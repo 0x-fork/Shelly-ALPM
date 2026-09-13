@@ -68,6 +68,25 @@ paru -Rns shelly
   Flatpak applications alongside native packages without making Flatpak a
   runtime dependency of the base Shelly package.
 
+## PKGBUILD review
+
+Terminal PKGBUILD reviews show changed lines with three unchanged lines of
+context before and after each change. Nearby changes share their context;
+omitted sections are marked with the number of hidden lines. First reviews
+without a previous PKGBUILD show the complete file.
+
+`CollapsePkgbuildDiff` defaults to `true`, including for existing configurations
+that do not contain the setting. To show the full file during review:
+
+```bash
+shelly config set CollapsePkgbuildDiff false
+```
+
+Restore the collapsed view with `shelly config set CollapsePkgbuildDiff true`.
+Security warnings, attached source files, and approval prompts are always
+handled as before. This setting controls terminal review output; GUI reviews
+continue to receive the complete diff.
+
 ## Upgrade cache cleaning
 
 To skip the package-cache cleanup prompt and deletion during `shelly upgrade all`:
