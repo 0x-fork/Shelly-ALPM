@@ -3041,6 +3041,65 @@ test "PackageBuilder extracts source archives into srcdir" {
     try fixture.temporary.dir.access(io, "pkg/demo/usr/share/demo/source.txt", .{});
 }
 
+test "PackageBuilder issue 1910 plain text sources are not extracted as mtree" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('payload.tar.xz' 'compatibilitytool.vdf.template' 'ntsync.conf')
+        \\sha256sums=('SKIP' 'SKIP' 'SKIP')
+        \\prepare() {
+        \\  cmp "$startdir/compatibilitytool.vdf.template" "$srcdir/compatibilitytool.vdf.template" || return 1
+        \\  cmp "$startdir/ntsync.conf" "$srcdir/ntsync.conf" || return 1
+        \\  test "$(cat "$srcdir/demo/source.txt")" = extracted
+        \\}
+        \\package() {
+        \\  install -Dm644 "$srcdir/compatibilitytool.vdf.template" "$pkgdir/usr/share/demo/compatibilitytool.vdf.template"
+        \\  install -Dm644 "$srcdir/ntsync.conf" "$pkgdir/usr/share/demo/ntsync.conf"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+
+    const archive_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "payload.tar.xz" });
+    defer allocator.free(archive_path);
+    try archive.writeFixture(allocator, archive_path, .xz, &.{
+        .{ .path = "demo/source.txt", .contents = "extracted\n" },
+    });
+    // Libarchive's mtree bidder accepts both files and interprets the
+    // template's repeated braces as colliding archive entry paths.
+    const template =
+        \\"compatibilitytools"
+        \\{
+        \\  "compat_tools"
+        \\  {
+        \\    "##INTERNAL_TOOL_NAME##"
+        \\    {
+        \\      "install_path" "##INSTALL_PATH##"
+        \\    }
+        \\  }
+        \\}
+        \\
+    ;
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "compatibilitytool.vdf.template", .data = template });
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "ntsync.conf", .data = "ntsync\n" });
+    fixture.builder.options.sources_prepared = false;
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
+    const packaged_template = try fixture.temporary.dir.readFileAlloc(io, "pkg/demo/usr/share/demo/compatibilitytool.vdf.template", allocator, .limited(1024));
+    defer allocator.free(packaged_template);
+    try testing.expectEqualStrings(template, packaged_template);
+    const packaged_config = try fixture.temporary.dir.readFileAlloc(io, "pkg/demo/usr/share/demo/ntsync.conf", allocator, .limited(1024));
+    defer allocator.free(packaged_config);
+    try testing.expectEqualStrings("ntsync\n", packaged_config);
+    for ([_][]const u8{ "src/{", "src/}", "src/ntsync" }) |path|
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, path, .{}));
+}
+
 test "PackageBuilder detects source archives by content including zip and tar zstd" {
     const allocator = testing.allocator;
     const io = testing.io;
