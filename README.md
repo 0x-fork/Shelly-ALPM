@@ -87,6 +87,35 @@ Security warnings, attached source files, and approval prompts are always
 handled as before. This setting controls terminal review output; GUI reviews
 continue to receive the complete diff.
 
+## AppImage checks during combined upgrades
+
+To skip AppImage update checks and upgrades during `shelly upgrade all`:
+
+```bash
+shelly config set DisableAppImageUpdateCheck true
+```
+
+This also applies to combined-upgrade aliases, including bare `shelly` and
+`shelly -U`. The setting defaults to `false`; restore AppImage checks with
+`shelly config set DisableAppImageUpdateCheck false`. Explicit
+`shelly upgrade appimage` and `shelly list-updates` checks remain available.
+The one-time `shelly upgrade all --no-appimage` flag also skips AppImages.
+
+## Flatpak checks during combined upgrades
+
+To skip Flatpak update checks and upgrades during `shelly upgrade all`:
+
+```bash
+shelly config set DisableFlatpakUpdateCheck true
+```
+
+This also applies to combined-upgrade aliases, including bare `shelly` and
+`shelly -U`. The setting defaults to `false`; restore Flatpak checks with
+`shelly config set DisableFlatpakUpdateCheck false`. Explicit
+`shelly upgrade flatpak` and `shelly list-updates` checks remain available.
+The one-time `shelly upgrade all --no-flatpak` flag also skips Flatpak.
+This preference can be used together with `DisableAppImageUpdateCheck`.
+
 ## Upgrade cache cleaning
 
 To skip the package-cache cleanup prompt and deletion during `shelly upgrade all`:

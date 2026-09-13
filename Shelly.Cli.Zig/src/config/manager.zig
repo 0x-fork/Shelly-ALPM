@@ -145,7 +145,19 @@ test "creates, updates, and reloads the XDG config file" {
     try std.testing.expectEqualStrings("False", (try manager.get("CollapsePkgbuildDiff")).?);
     try std.testing.expect(!try manager.update("CollapsePkgbuildDiff", "yes"));
     try std.testing.expectEqualStrings("False", (try manager.get("CollapsePkgbuildDiff")).?);
+    try std.testing.expectEqualStrings("False", (try manager.get("DisableAppImageUpdateCheck")).?);
+    try std.testing.expect(try manager.update("disableappimageupdatecheck", "TrUe"));
+    try std.testing.expectEqualStrings("True", (try manager.get("DisableAppImageUpdateCheck")).?);
+    try std.testing.expectEqualStrings("False", (try manager.get("DisableFlatpakUpdateCheck")).?);
+    try std.testing.expect(try manager.update("disableflatpakupdatecheck", "TrUe"));
+    try std.testing.expectEqualStrings("True", (try manager.get("DisableFlatpakUpdateCheck")).?);
+    try std.testing.expect(!try manager.update("DisableFlatpakUpdateCheck", "yes"));
+    try std.testing.expectEqualStrings("True", (try manager.get("DisableFlatpakUpdateCheck")).?);
+    try std.testing.expect(!try manager.update("DisableAppImageUpdateCheck", "yes"));
+    try std.testing.expectEqualStrings("True", (try manager.get("DisableAppImageUpdateCheck")).?);
     try manager.reset();
+    try std.testing.expectEqualStrings("False", (try manager.get("DisableFlatpakUpdateCheck")).?);
+    try std.testing.expectEqualStrings("False", (try manager.get("DisableAppImageUpdateCheck")).?);
     try std.testing.expectEqualStrings("True", (try manager.get("CollapsePkgbuildDiff")).?);
     try std.testing.expectEqualStrings("False", (try manager.get("DisableCacheClean")).?);
 }

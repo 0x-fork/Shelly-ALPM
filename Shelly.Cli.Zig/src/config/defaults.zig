@@ -9,6 +9,8 @@ pub const json =
     \\  "ProgressBarWidth": 24,
     \\  "OutputMode": "singlepane",
     \\  "AppImageInstallPath": null,
+    \\  "DisableAppImageUpdateCheck": false,
+    \\  "DisableFlatpakUpdateCheck": false,
     \\  "AutoConfirmCacheClean": false,
     \\  "DisableCacheClean": false,
     \\  "CollapsePkgbuildDiff": true,
@@ -28,5 +30,7 @@ test "native defaults remain valid JSON" {
     );
     try std.testing.expect(!parsed.value.object.get("AutoConfirmCacheClean").?.bool);
     try std.testing.expect(!parsed.value.object.get("DisableCacheClean").?.bool);
+    try std.testing.expect(!parsed.value.object.get("DisableAppImageUpdateCheck").?.bool);
+    try std.testing.expect(!parsed.value.object.get("DisableFlatpakUpdateCheck").?.bool);
     try std.testing.expect(parsed.value.object.get("CollapsePkgbuildDiff").?.bool);
 }
