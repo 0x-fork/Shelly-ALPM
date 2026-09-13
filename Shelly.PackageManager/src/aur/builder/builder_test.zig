@@ -2682,6 +2682,247 @@ test "PackageBuilder runs verify after integrity checks and before extraction" {
     try fixture.temporary.dir.access(io, "pkg/verify-order/usr/share/verify-order/source.txt", .{});
 }
 
+test "PackageBuilder verify supports downloaded archives in shared and separate source caches" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_]bool{ false, true }) |separate_cache| {
+        var remote = std.testing.tmpDir(.{});
+        defer remote.cleanup();
+        const remote_path = try remote.dir.realPathFileAlloc(io, ".", allocator);
+        defer allocator.free(remote_path);
+        const archive_path = try std.fs.path.join(allocator, &.{ remote_path, "payload.tar.gz" });
+        defer allocator.free(archive_path);
+        try archive.writeFixture(allocator, archive_path, .gzip, &.{
+            .{ .path = "demo/source.txt", .contents = "extracted\n" },
+        });
+        const payload = try remote.dir.readFileAlloc(io, "payload.tar.gz", allocator, .unlimited);
+        defer allocator.free(payload);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
+        const checksum = try std.fmt.allocPrint(allocator, "{s}  downloaded.tar.gz\n", .{std.fmt.bytesToHex(digest, .lower)});
+        defer allocator.free(checksum);
+        try remote.dir.writeFile(io, .{ .sub_path = "payload.sha256", .data = checksum });
+        const pkgbuild = try std.fmt.allocPrint(allocator,
+            \\pkgname=verify-download
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('downloaded.tar.gz::file://{s}/payload.tar.gz' 'file://{s}/payload.sha256')
+            \\sha256sums=('SKIP' 'SKIP')
+            \\verify() {{
+            \\  test "$PWD" = "$startdir"
+            \\  test ! -e demo/source.txt
+            \\  sha256sum -c payload.sha256
+            \\  printf 'verified\n' >> verify-count
+            \\}}
+            \\package() {{
+            \\  install -Dm644 demo/source.txt "$pkgdir/usr/share/verify-download/source.txt"
+            \\}}
+        , .{ remote_path, remote_path });
+        defer allocator.free(pkgbuild);
+        var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+        defer fixture.destroy();
+        fixture.builder.options.sources_prepared = false;
+        fixture.builder.options.skip_source_pgp_verification = false;
+        fixture.builder.options.run_verify = true;
+        // A /./ alias must also be recognized as the shared cache directory.
+        const cache = try std.fs.path.join(allocator, &.{ fixture.build_dir, if (separate_cache) "cache" else "." });
+        defer allocator.free(cache);
+        fixture.builder.options.source_destination = cache;
+        const cached_path = try std.fs.path.join(allocator, &.{ cache, "downloaded.tar.gz" });
+        defer allocator.free(cached_path);
+        for (0..2) |attempt| {
+            const artifacts = try fixture.builder.run();
+            defer builder_mod.deinitArtifacts(allocator, artifacts);
+            try testing.expectEqual(@as(usize, 1), artifacts.len);
+            try fixture.temporary.dir.access(io, "pkg/verify-download/usr/share/verify-download/source.txt", .{});
+            const cached = try std.Io.Dir.cwd().statFile(io, cached_path, .{ .follow_symlinks = false });
+            try testing.expectEqual(.file, cached.kind);
+            if (separate_cache)
+                try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "downloaded.tar.gz", .{}));
+            if (attempt == 0) {
+                // The second build must succeed using only cached downloads.
+                try remote.dir.deleteFile(io, "payload.tar.gz");
+                try remote.dir.deleteFile(io, "payload.sha256");
+            }
+        }
+        const count = try fixture.temporary.dir.readFileAlloc(io, "verify-count", allocator, .unlimited);
+        defer allocator.free(count);
+        try testing.expectEqualStrings("verified\nverified\n", count);
+        // SKIP still delegates this archive's checksum to the custom hook.
+        // A bad sidecar must abort before replacing the committed src tree.
+        try fixture.temporary.dir.writeFile(io, .{
+            .sub_path = if (separate_cache) "cache/payload.sha256" else "payload.sha256",
+            .data = "0" ** 64 ++ "  downloaded.tar.gz\n",
+        });
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        try fixture.temporary.dir.access(io, "src/demo/source.txt", .{});
+        const final_count = try fixture.temporary.dir.readFileAlloc(io, "verify-count", allocator, .unlimited);
+        defer allocator.free(final_count);
+        try testing.expectEqualStrings("verified\nverified\n", final_count);
+    }
+}
+
+test "PackageBuilder verify carries cached download mutations into extraction" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=verify-mutation
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('renamed.txt::https://example.invalid/payload')
+        \\sha256sums=('a9f2d25d1f71f8065e2119e538bde8846570fcdad320388236e99d9e225c290d')
+        \\verify() {
+        \\  test "$(cat renamed.txt)" = reviewed
+        \\  printf 'modified\n' > renamed.txt
+        \\}
+        \\package() {
+        \\  test "$(cat renamed.txt)" = modified
+        \\  install -Dm644 renamed.txt "$pkgdir/usr/share/verify-mutation/payload"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    fixture.builder.options.sources_prepared = false;
+    fixture.builder.options.skip_source_pgp_verification = false;
+    fixture.builder.options.run_verify = true;
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "renamed.txt", .data = "reviewed\n" });
+    const artifacts = try fixture.builder.run();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const cached = try fixture.temporary.dir.readFileAlloc(io, "renamed.txt", allocator, .unlimited);
+    defer allocator.free(cached);
+    try testing.expectEqualStrings("modified\n", cached);
+}
+
+test "PackageBuilder verify failure preserves downloaded caches and committed sources" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_]bool{ false, true }) |separate_cache| {
+        var fixture = try Fixture.create(allocator,
+            \\pkgname=verify-download-failure
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('https://example.invalid/payload')
+            \\sha256sums=('SKIP')
+            \\verify() {
+            \\  printf 'ran\n' > verify-ran
+            \\  return 23
+            \\}
+            \\package() {
+            \\  mkdir -p "$pkgdir"
+            \\}
+        , null, null);
+        defer fixture.destroy();
+        fixture.builder.options.sources_prepared = false;
+        fixture.builder.options.skip_source_pgp_verification = false;
+        fixture.builder.options.run_verify = true;
+        const cache = try std.fs.path.join(allocator, &.{ fixture.build_dir, "cache" });
+        defer allocator.free(cache);
+        if (separate_cache) {
+            fixture.builder.options.source_destination = cache;
+            try fixture.temporary.dir.createDirPath(io, "cache");
+        }
+        const payload_path = if (separate_cache) "cache/payload" else "payload";
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = payload_path, .data = "payload\n" });
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "src/retained", .data = "old tree\n" });
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        try fixture.temporary.dir.access(io, "verify-ran", .{});
+        try fixture.temporary.dir.access(io, "src/retained", .{});
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".sources.shelly-staging", .{}));
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+        const cached = try fixture.temporary.dir.readFileAlloc(io, payload_path, allocator, .unlimited);
+        defer allocator.free(cached);
+        try testing.expectEqualStrings("payload\n", cached);
+        if (separate_cache)
+            try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "payload", .{}));
+    }
+}
+
+test "PackageBuilder verify rejects unrelated paths and cleans earlier temporary links" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_]std.Io.File.Kind{ .file, .directory, .sym_link }) |kind| {
+        var fixture = try Fixture.create(allocator,
+            \\pkgname=verify-conflict
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('https://example.invalid/first' 'https://example.invalid/payload')
+            \\sha256sums=('SKIP' 'SKIP')
+            \\verify() {
+            \\  touch verify-ran
+            \\}
+            \\package() {
+            \\  mkdir -p "$pkgdir"
+            \\}
+        , null, null);
+        defer fixture.destroy();
+        fixture.builder.options.sources_prepared = false;
+        fixture.builder.options.skip_source_pgp_verification = false;
+        fixture.builder.options.run_verify = true;
+        const cache = try std.fs.path.join(allocator, &.{ fixture.build_dir, "cache" });
+        defer allocator.free(cache);
+        fixture.builder.options.source_destination = cache;
+        try fixture.temporary.dir.createDirPath(io, "cache");
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "cache/first", .data = "first\n" });
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "cache/payload", .data = "download\n" });
+        switch (kind) {
+            .file => try fixture.temporary.dir.writeFile(io, .{ .sub_path = "payload", .data = "user data\n" }),
+            .directory => try fixture.temporary.dir.createDirPath(io, "payload"),
+            .sym_link => try fixture.temporary.dir.symLink(io, "missing-target", "payload", .{}),
+            else => unreachable,
+        }
+        try testing.expectError(error.SourceVerificationViewConflict, fixture.builder.run());
+        try testing.expectEqual(kind, (try fixture.temporary.dir.statFile(io, "payload", .{ .follow_symlinks = false })).kind);
+        if (kind == .file) {
+            const contents = try fixture.temporary.dir.readFileAlloc(io, "payload", allocator, .unlimited);
+            defer allocator.free(contents);
+            try testing.expectEqualStrings("user data\n", contents);
+        }
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.statFile(io, "first", .{ .follow_symlinks = false }));
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "verify-ran", .{}));
+        try fixture.temporary.dir.access(io, "cache/first", .{});
+        try fixture.temporary.dir.access(io, "cache/payload", .{});
+    }
+}
+
+test "PackageBuilder verify rejects non-file entries in the shared download cache" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_]std.Io.File.Kind{ .directory, .sym_link }) |kind| {
+        var fixture = try Fixture.create(allocator,
+            \\pkgname=verify-invalid-cache
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('https://example.invalid/payload')
+            \\sha256sums=('SKIP')
+            \\verify() {
+            \\  touch verify-ran
+            \\}
+            \\package() {
+            \\  mkdir -p "$pkgdir"
+            \\}
+        , null, null);
+        defer fixture.destroy();
+        fixture.builder.options.sources_prepared = false;
+        fixture.builder.options.skip_source_pgp_verification = false;
+        fixture.builder.options.run_verify = true;
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "user-data", .data = "untouched\n" });
+        if (kind == .directory)
+            try fixture.temporary.dir.createDirPath(io, "payload")
+        else
+            try fixture.temporary.dir.symLink(io, "user-data", "payload", .{});
+        try testing.expectError(error.InvalidSourceCacheEntry, fixture.builder.run());
+        try testing.expectEqual(kind, (try fixture.temporary.dir.statFile(io, "payload", .{ .follow_symlinks = false })).kind);
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "verify-ran", .{}));
+        const contents = try fixture.temporary.dir.readFileAlloc(io, "user-data", allocator, .unlimited);
+        defer allocator.free(contents);
+        try testing.expectEqualStrings("untouched\n", contents);
+    }
+}
+
 test "PackageBuilder verify failure preserves the committed src tree" {
     const allocator = testing.allocator;
     const io = testing.io;
