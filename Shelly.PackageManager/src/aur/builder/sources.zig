@@ -741,7 +741,7 @@ fn extractSourceArchiveIfRecognized(
         .not_archive => return false,
         .archive => |entry| entry,
     };
-    if (reader.isCompressedPlainFile()) return false;
+    if (reader.isPlainSourceFile()) return false;
     var directory_timestamps: std.ArrayList(DirectoryTimestamp) = .empty;
     defer {
         for (directory_timestamps.items) |timestamp| self.allocator.free(timestamp.path);
