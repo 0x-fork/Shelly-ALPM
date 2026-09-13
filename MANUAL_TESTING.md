@@ -12,6 +12,33 @@ tests.
 - [ ] Run a combined upgrade where one backend fails after another succeeds; verify the tray reflects the remaining updates and the command still returns failure.
 - [ ] Repeat with the tray stopped or the session bus unavailable; verify no notification errors appear and the CLI retains its normal exit status.
 
+## Terminal PKGBUILD review (#1385)
+
+- [ ] With a configuration missing `CollapsePkgbuildDiff`, verify `shelly config get CollapsePkgbuildDiff` returns `True`.
+- [ ] Review an AUR update with a long PKGBUILD: each change has three unchanged context lines on either side, nearby sections merge, and omitted sections show their line counts.
+- [ ] Run `shelly config set CollapsePkgbuildDiff false`, then repeat the review and verify the full file appears. Restore `true` and verify the collapsed view returns.
+- [ ] Review a package without a previous PKGBUILD and verify the entire new file appears.
+- [ ] Confirm security warnings and related source files remain visible, and declining approval still cancels the operation.
+- [ ] Repeat with color disabled and redirected output; omission markers and changes remain readable.
+- [ ] Verify GUI PKGBUILD reviews still receive the complete diff regardless of this setting.
+
+## AppImage checks during combined upgrades
+
+- [ ] Verify `shelly config get DisableAppImageUpdateCheck` returns `False` for a configuration without the new key.
+- [ ] Set `DisableAppImageUpdateCheck` to `true` and run `shelly upgrade all`: the preview omits AppImages, and execution performs no AppImage update check or upgrade.
+- [ ] Repeat with bare `shelly`, `shelly -U`, and `shelly upgrade standard --all`, including privilege elevation.
+- [ ] Verify `shelly upgrade appimage` and `shelly list-updates appimage` still check AppImages explicitly.
+- [ ] Restore `false` and verify combined upgrades include AppImages again; `--no-appimage` still skips them for one run.
+
+## Flatpak checks during combined upgrades
+
+- [ ] Verify `shelly config get DisableFlatpakUpdateCheck` returns `False` for a configuration without the new key.
+- [ ] Set `DisableFlatpakUpdateCheck` to `true` and run `shelly upgrade all`: the preview omits Flatpak, and execution performs no Flatpak update check or upgrade.
+- [ ] Repeat with bare `shelly`, `shelly -U`, and `shelly upgrade standard --all`, including privilege elevation.
+- [ ] Enable both `DisableFlatpakUpdateCheck` and `DisableAppImageUpdateCheck`; verify combined upgrades skip both backends.
+- [ ] Verify `shelly upgrade flatpak` and `shelly list-updates flatpak` still check Flatpak explicitly.
+- [ ] Restore `false` and verify combined upgrades include Flatpak again when the backend is installed; `--no-flatpak` still skips it for one run.
+
 ## UI Testing (Shelly-UI)
 
 ### Installation & Startup
