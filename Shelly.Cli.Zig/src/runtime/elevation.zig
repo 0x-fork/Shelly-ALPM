@@ -515,12 +515,12 @@ fn buildInvokingUserArguments(
     return result;
 }
 
-const InvokingIdentity = struct {
+pub const InvokingIdentity = struct {
     username: []const u8,
     uid: []const u8,
     gid: []const u8,
 
-    fn deinit(self: InvokingIdentity, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: InvokingIdentity, allocator: std.mem.Allocator) void {
         allocator.free(self.username);
         allocator.free(self.uid);
         allocator.free(self.gid);
@@ -528,7 +528,7 @@ const InvokingIdentity = struct {
 };
 
 /// Resolves the original non-root caller through NSS. All strings are owned.
-fn invokingUser(context: *const context_module.RuntimeContext) !?InvokingIdentity {
+pub fn invokingUser(context: *const context_module.RuntimeContext) !?InvokingIdentity {
     const environment = context.environment orelse return null;
     return invokingIdentity(context.allocator, environment, user_account);
 }

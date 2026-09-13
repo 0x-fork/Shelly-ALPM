@@ -27,6 +27,7 @@ pub const RuntimeContext = struct {
     dispatcher: Dispatcher = .{},
     preparation_diagnostic: ?*?Zigalpm.pkgbuild.parser.Diagnostic = null,
     transaction_log: ?*log.TransactionLog = null,
+    tray_refresh_requested: bool = false,
 
     pub fn dispatch(self: *RuntimeContext, invocation: *const parser.Invocation) !u8 {
         return self.dispatcher.call(self.dispatcher.user_data, self, invocation);

@@ -107,5 +107,6 @@ pub fn main(init: std.process.Init) !void {
 
     try stdout_writer.flush();
     try stderr_writer.flush();
+    if (context.tray_refresh_requested) Shelly_Cli_Zig.tray.refresh(&context);
     std.process.exit(exit_code);
 }
