@@ -477,6 +477,11 @@ fn executeWithRunner(
     invocation: *const parser.Invocation,
     runner: anytype,
 ) anyerror!u8 {
+    // Defer the tray check until all selected backends have released their locks.
+    // Some backends may have succeeded even when the combined upgrade fails.
+    defer if (!invocation.globals.ui_mode) {
+        context.tray_refresh_requested = true;
+    };
     const Selected = struct {
         inner: @TypeOf(runner),
 
@@ -1843,6 +1848,7 @@ test "upgrade routes every action-first type through the combined handler" {
         var observed: Observed = .{};
 
         try std.testing.expectEqual(@as(u8, 0), try executeWithRunner(&context, &outcome.dispatch, &observed));
+        try std.testing.expect(context.tray_refresh_requested);
         try std.testing.expectEqual(expected.backend, observed.backend.?);
         try std.testing.expect(std.mem.indexOf(
             u8,
@@ -1942,11 +1948,12 @@ test "upgrade all continues after a failed backend and returns failure" {
 
         fn run(
             self: *@This(),
-            _: *runtime.RuntimeContext,
+            context: *runtime.RuntimeContext,
             _: *Zigalpm.OperationContext,
             backend: Backend,
             _: *const parser.Invocation,
         ) !void {
+            try std.testing.expect(!context.tray_refresh_requested);
             try self.backends.append(std.testing.allocator, backend);
             if (backend == .aur) return error.SyntheticAurFailure;
         }
@@ -1955,6 +1962,7 @@ test "upgrade all continues after a failed backend and returns failure" {
     defer calls.backends.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u8, 1), try executeWithRunner(&tc.context, &outcome.dispatch, &calls));
+    try std.testing.expect(tc.context.tray_refresh_requested);
     try std.testing.expectEqualSlices(Backend, &all_backends, calls.backends.items);
     try std.testing.expect(std.mem.indexOf(u8, tc.stdout.writer.buffered(), "Could not complete the AUR upgrade") != null);
     try std.testing.expect(std.mem.indexOf(
@@ -2120,6 +2128,7 @@ test "upgrade UI mode emits backend percentage frames" {
     };
 
     try std.testing.expectEqual(@as(u8, 0), try executeWithRunner(&tc.context, &outcome.dispatch, Progress{}));
+    try std.testing.expect(!tc.context.tray_refresh_requested);
     const rendered = tc.stdout.writer.buffered();
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, rendered, "[JSON]"));
     try std.testing.expect(std.mem.indexOf(u8, rendered, "[/JSON]") != null);
