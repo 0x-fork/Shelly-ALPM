@@ -3,6 +3,15 @@
 This document tracks manual testing procedures for Shelly components that require human verification beyond automated
 tests.
 
+## Tray refresh after CLI updates (#1591)
+
+- [ ] With pending updates visible in the tray, run `shelly upgrade` in a terminal. After completion, verify the tray rechecks and updates its icon and package submenus without restarting it.
+- [ ] Repeat for individual `upgrade standard`, `upgrade aur`, `upgrade flatpak`, and `update` commands. Packages still awaiting updates should remain listed.
+- [ ] Run an update through `sudo` or the configured privilege elevator; verify the original user's tray refreshes.
+- [ ] Complete a CLI update while the tray is already checking. Verify it checks again after the in-progress check finishes.
+- [ ] Run a combined upgrade where one backend fails after another succeeds; verify the tray reflects the remaining updates and the command still returns failure.
+- [ ] Repeat with the tray stopped or the session bus unavailable; verify no notification errors appear and the CLI retains its normal exit status.
+
 ## UI Testing (Shelly-UI)
 
 ### Installation & Startup
