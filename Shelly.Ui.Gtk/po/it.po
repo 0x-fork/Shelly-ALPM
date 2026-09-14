@@ -861,7 +861,7 @@ msgid "download"
 msgstr "da scaricare"
 
 msgid "net"
-msgstr "netto"
+msgstr "netti"
 
 msgid "Dismiss"
 msgstr "Scarta"
