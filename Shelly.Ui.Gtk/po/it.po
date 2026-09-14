@@ -1299,7 +1299,7 @@ msgid "Remove from selection"
 msgstr "Rimuovi dalla selezione"
 
 msgid "remove"
-msgstr "rimuovi"
+msgstr "rimuovere"
 
 msgid "install"
 msgstr "installare"
