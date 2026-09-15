@@ -73,14 +73,14 @@ pub const PackageDetail = extern struct {
 
         const group = gio.SimpleActionGroup.new();
 
-        p.reinstall_action = addAction(self, group, "reinstall", &on_reinstall);
-        p.add_ignore_action = addAction(self, group, "addignore", &on_add_ignore);
+        p.reinstall_action = addAction(self, group, "reinstall", &onReinstall);
+        p.add_ignore_action = addAction(self, group, "addignore", &onAddIgnore);
         p.add_hold_action = addAction(self, group, "addhold", &on_add_hold);
         p.add_explicit_action = addAction(self, group, "addexplicit", &on_add_explicit);
         p.mark_dependency_action = addAction(self, group, "dependency", &on_mark_dependency);
 
         gtk.Widget.insertActionGroup(self.as(gtk.Widget), "detail", group.as(gio.ActionGroup));
-        _ = gtk.Button.signals.clicked.connect(p.back_button, *Self, &on_back_clicked, self, .{});
+        _ = gtk.Button.signals.clicked.connect(p.back_button, *Self, &onBackClicked, self, .{});
         group.as(gobject.Object).unref();
     }
 
@@ -103,13 +103,13 @@ pub const PackageDetail = extern struct {
 
     pub fn showPackage(self: *Self, name: []const u8, is_installed: bool, icon_path: ?[:0]const u8) void {
         const p = self.priv();
-        clear_nav_stack(self);
+        clearNavStack(self);
         p.base_installed = is_installed;
-        self.show_package_internal(name, is_installed, icon_path);
-        update_nav(self);
+        self.showPackageInternal(name, is_installed, icon_path);
+        updateNav(self);
     }
 
-    fn show_package_internal(self: *Self, name: []const u8, is_installed: bool, icon_path: ?[:0]const u8) void {
+    fn showPackageInternal(self: *Self, name: []const u8, is_installed: bool, icon_path: ?[:0]const u8) void {
         const p = self.priv();
         const len = @min(name.len, p.pending_name.len);
         @memset(&p.pending_name, 0);
@@ -133,10 +133,10 @@ pub const PackageDetail = extern struct {
             _ = glib.Source.remove(p.debounce_source);
             p.debounce_source = 0;
         }
-        p.debounce_source = glib.timeoutAdd(150, &on_debounce, self);
+        p.debounce_source = glib.timeoutAdd(150, &onDebounce, self);
     }
 
-    fn on_debounce(data: ?*anyopaque) callconv(.c) c_int {
+    fn onDebounce(data: ?*anyopaque) callconv(.c) c_int {
         const self: *Self = @ptrCast(@alignCast(data.?));
         const p = self.priv();
         p.debounce_source = 0;
@@ -176,7 +176,7 @@ pub const PackageDetail = extern struct {
         post_result(page, parsed.value, arena_ptr, gen);
     }
 
-    const Result = struct { page: *Self, package: Package, arena: *std.heap.ArenaAllocator, generation: u64 };
+    const Result = struct { page: *Self, package: Package, opt: bool, arena: *std.heap.ArenaAllocator, generation: u64 };
 
     fn post_result(page: *Self, package: Package, arena: *std.heap.ArenaAllocator, gen: u64) void {
         const r = std.heap.c_allocator.create(Result) catch {
@@ -184,11 +184,11 @@ pub const PackageDetail = extern struct {
             std.heap.c_allocator.destroy(arena);
             return;
         };
-        r.* = .{ .page = page, .package = package, .arena = arena, .generation = gen };
-        _ = glib.idleAdd(&on_complete, r);
+        r.* = .{ .page = page, .package = package, .opt = false, .arena = arena, .generation = gen };
+        _ = glib.idleAdd(&onComplete, r);
     }
 
-    fn on_complete(data: ?*anyopaque) callconv(.c) c_int {
+    fn onComplete(data: ?*anyopaque) callconv(.c) c_int {
         const r: *Result = @ptrCast(@alignCast(data.?));
         defer std.heap.c_allocator.destroy(r);
         const p = r.page.priv();
@@ -205,11 +205,11 @@ pub const PackageDetail = extern struct {
         }
         p.arena = r.arena;
 
-        populate(r.page, r.package);
+        populate(r.page, r.package, r.opt);
         return 0;
     }
 
-    fn populate(self: *Self, package: Package) void {
+    fn populate(self: *Self, package: Package, opt: bool) void {
         const p = self.priv();
         var buf: [512]u8 = undefined;
 
@@ -221,34 +221,37 @@ pub const PackageDetail = extern struct {
         var sbuf: [32]u8 = undefined;
 
         clear_box(p.spec_box);
-        add_spec_row(p.spec_box, translations._("Version"), package.Version);
-        add_spec_row(p.spec_box, translations._("Repository"), package.Repository);
-        add_spec_row(p.spec_box, translations._("Installed Size"), SizeConverter.convert_null_term(&sbuf, package.InstalledSize));
-        if (package.DownloadSize > 0) add_spec_size(p.spec_box, translations._("Download Size"), package.DownloadSize);
-        if (package.BuildDate.len > 0) add_spec_row(p.spec_box, translations._("Build Date"), package.BuildDate);
-        if (package.InstallReason.len > 0) add_spec_row(p.spec_box, translations._("Install Reason"), package.InstallReason);
+        addSpecRow(p.spec_box, translations._("Version"), package.Version);
+        addSpecRow(p.spec_box, translations._("Repository"), package.Repository);
+        addSpecRow(p.spec_box, translations._("Installed Size"), SizeConverter.convert_null_term(&sbuf, package.InstalledSize));
+        if (package.DownloadSize > 0) addSpecSize(p.spec_box, translations._("Download Size"), package.DownloadSize);
+        if (package.BuildDate.len > 0) addSpecRow(p.spec_box, translations._("Build Date"), package.BuildDate);
+        if (package.InstallReason.len > 0) addSpecRow(p.spec_box, translations._("Install Reason"), package.InstallReason);
 
-        if (package.Url) |u| if (u.len > 0) add_url_spec_row(p.spec_box, translations._("URL"), u);
+        if (package.Url) |u| if (u.len > 0) addUrlSpecRow(p.spec_box, translations._("URL"), u);
 
         clear_box(p.sections_box);
         const alloc = (p.arena orelse return).allocator();
 
-        add_spec_list(p.spec_box, alloc, translations._("Licenses"), package.Licenses);
-        add_spec_list(p.spec_box, alloc, translations._("Provides"), package.Provides);
-        add_spec_list(p.spec_box, alloc, translations._("Conflicts"), package.Conflicts);
+        addSpecList(p.spec_box, alloc, translations._("Licenses"), package.Licenses);
+        addSpecList(p.spec_box, alloc, translations._("Provides"), package.Provides);
+        addSpecList(p.spec_box, alloc, translations._("Conflicts"), package.Conflicts);
 
-        add_list_section(p.sections_box, self, translations._("Depends"), package.Depends, null);
-        add_list_section(
+        addListSection(p.sections_box, self, translations._("Depends"), package.Depends, null);
+        addListSection(
             p.sections_box,
             self,
             translations._("Optional Depends"),
             package.OptDepends,
             package.OptDependsInstalled,
         );
-        add_list_section(p.sections_box, self, translations._("Required By"), package.RequiredBy, null);
+        addListSection(p.sections_box, self, translations._("Required By"), package.RequiredBy, null);
+        if (opt){
+           addSpecRow(p.spec_box, translations._("optional"), package.Version);
+        }
     }
 
-    fn add_spec_row(box: *gtk.Box, label: []const u8, value: []const u8) void {
+    fn addSpecRow(box: *gtk.Box, label: []const u8, value: []const u8) void {
         var lbuf: [64]u8 = undefined;
         var vbuf: [512]u8 = undefined;
         const row = gtk.Box.new(.horizontal, 8);
@@ -271,7 +274,7 @@ pub const PackageDetail = extern struct {
         gtk.Box.append(box, row.as(gtk.Widget));
     }
 
-    fn add_url_spec_row(box: *gtk.Box, label: []const u8, value: []const u8) void {
+    fn addUrlSpecRow(box: *gtk.Box, label: []const u8, value: []const u8) void {
         var lbuf: [64]u8 = undefined;
         const row = gtk.Box.new(.horizontal, 8);
         gtk.Widget.setMarginTop(row.as(gtk.Widget), 10);
@@ -295,7 +298,7 @@ pub const PackageDetail = extern struct {
         gtk.Box.append(box, row.as(gtk.Widget));
     }
 
-    fn add_spec_list(box: *gtk.Box, allocator: std.mem.Allocator, label: []const u8, items: []const []const u8) void {
+    fn addSpecList(box: *gtk.Box, allocator: std.mem.Allocator, label: []const u8, items: []const []const u8) void {
         if (items.len == 0) return;
         var joined: std.ArrayListUnmanaged(u8) = .empty;
         defer joined.deinit(allocator);
@@ -305,10 +308,10 @@ pub const PackageDetail = extern struct {
         }
         joined.append(allocator, 0) catch return;
         const value: [:0]const u8 = joined.items[0 .. joined.items.len - 1 :0];
-        add_spec_row_raw(box, label, value);
+        addUrlSpecRowRaw(box, label, value);
     }
 
-    fn add_spec_row_raw(box: *gtk.Box, label: []const u8, value: [:0]const u8) void {
+    fn addUrlSpecRowRaw(box: *gtk.Box, label: []const u8, value: [:0]const u8) void {
         var lbuf: [64]u8 = undefined;
         const row = gtk.Box.new(.horizontal, 8);
         gtk.Widget.setMarginTop(row.as(gtk.Widget), 10);
@@ -332,7 +335,7 @@ pub const PackageDetail = extern struct {
         gtk.Box.append(box, row.as(gtk.Widget));
     }
 
-    fn add_list_section(
+    fn addListSection(
         box: *gtk.Box,
         page: *PackageDetail,
         title: []const u8,
@@ -351,7 +354,7 @@ pub const PackageDetail = extern struct {
         gtk.Widget.setMarginStart(list.as(gtk.Widget), 8);
 
         for (items, 0..) |item, index| {
-            const dep_name = strip_version(item);
+            const dep_name = stripVersion(item);
             const is_installed = if (installed_states) |states|
                 index < states.len and states[index]
             else
@@ -373,12 +376,12 @@ pub const PackageDetail = extern struct {
                 gtk.Widget.addCssClass(lbl.as(gtk.Widget), "spec-value");
                 const row_content = gtk.Box.new(.horizontal, 8);
                 gtk.Box.append(row_content, lbl.as(gtk.Widget));
-                append_installed_indicator(row_content, is_installed);
+                appendInstalledIndicator(row_content, is_installed);
                 gtk.Button.setChild(row_btn, row_content.as(gtk.Widget));
                 const name_owned = std.heap.c_allocator.dupeZ(u8, dep_name) catch continue;
                 gobject.Object.setDataFull(row_btn.as(gobject.Object), "dep-name", name_owned.ptr, &free_dep_name);
                 gobject.Object.setData(row_btn.as(gobject.Object), "page", page);
-                _ = gtk.Button.signals.clicked.connect(row_btn, ?*anyopaque, &on_dep_clicked, null, .{});
+                _ = gtk.Button.signals.clicked.connect(row_btn, ?*anyopaque, &onDepClicked, null, .{});
                 gtk.Box.append(list, row_btn.as(gtk.Widget));
             } else {
                 const row = gtk.Box.new(.horizontal, 8);
@@ -393,7 +396,7 @@ pub const PackageDetail = extern struct {
                 gtk.Widget.addCssClass(lbl.as(gtk.Widget), "dim-label");
                 gtk.Widget.addCssClass(lbl.as(gtk.Widget), "dep-row-static");
                 gtk.Box.append(row, lbl.as(gtk.Widget));
-                append_installed_indicator(row, is_installed);
+                appendInstalledIndicator(row, is_installed);
                 gtk.Box.append(list, row.as(gtk.Widget));
             }
         }
@@ -413,7 +416,7 @@ pub const PackageDetail = extern struct {
         gtk.Box.append(box, expander.as(gtk.Widget));
     }
 
-    fn append_installed_indicator(row: *gtk.Box, installed: bool) void {
+    fn appendInstalledIndicator(row: *gtk.Box, installed: bool) void {
         if (!installed) return;
         const icon = gtk.Image.newFromIconName("object-select-symbolic");
         gtk.Widget.setTooltipText(icon.as(gtk.Widget), translations._("Installed"));
@@ -425,7 +428,7 @@ pub const PackageDetail = extern struct {
         std.heap.c_allocator.free(std.mem.span(p));
     }
 
-    fn on_dep_clicked(button: *gtk.Button, _: ?*anyopaque) callconv(.c) void {
+    fn onDepClicked(button: *gtk.Button, _: ?*anyopaque) callconv(.c) void {
         const name_ptr = gobject.Object.getData(button.as(gobject.Object), "dep-name") orelse return;
         const name: [*:0]const u8 = @ptrCast(name_ptr);
         const page_ptr = gobject.Object.getData(button.as(gobject.Object), "page") orelse return;
@@ -442,35 +445,35 @@ pub const PackageDetail = extern struct {
             std.heap.c_allocator.free(owned);
             return;
         };
-        self.show_package_internal(name, false, null);
-        update_nav(self);
+        self.showPackageInternal(name, false, null);
+        updateNav(self);
     }
 
-    fn on_back_clicked(_: *gtk.Button, self: *Self) callconv(.c) void {
+    fn onBackClicked(_: *gtk.Button, self: *Self) callconv(.c) void {
         const p = self.priv();
         const prev = p.nav_stack.pop() orelse return;
         defer std.heap.c_allocator.free(prev);
 
         const at_root_after = p.nav_stack.items.len == 0;
         const installed = if (at_root_after) p.base_installed else false;
-        self.show_package_internal(prev, installed, null);
-        update_nav(self);
+        self.showPackageInternal(prev, installed, null);
+        updateNav(self);
     }
 
-    fn update_nav(self: *Self) void {
+    fn updateNav(self: *Self) void {
         const p = self.priv();
         const at_root = p.nav_stack.items.len == 0;
         gtk.Widget.setVisible(p.back_button.as(gtk.Widget), @intFromBool(!at_root));
         gtk.Widget.setVisible(p.actions_button.as(gtk.Widget), @intFromBool(at_root));
     }
 
-    fn clear_nav_stack(self: *Self) void {
+    fn clearNavStack(self: *Self) void {
         const p = self.priv();
         for (p.nav_stack.items) |name| std.heap.c_allocator.free(name);
         p.nav_stack.clearRetainingCapacity();
     }
 
-    fn strip_version(item: []const u8) []const u8 {
+    fn stripVersion(item: []const u8) []const u8 {
         const desc_end = std.mem.indexOfScalar(u8, item, ':') orelse item.len;
         var name = std.mem.trim(u8, item[0..desc_end], " ");
 
@@ -484,13 +487,13 @@ pub const PackageDetail = extern struct {
         return std.mem.trim(u8, name[0..cut], " ");
     }
 
-    fn add_spec_size(box: *gtk.Box, label: []const u8, bytes: i64) void {
+    fn addSpecSize(box: *gtk.Box, label: []const u8, bytes: i64) void {
         var buf: [32]u8 = undefined;
         const formatted = SizeConverter.convert_null_term(&buf, bytes);
-        add_spec_row(box, label, formatted);
+        addSpecRow(box, label, formatted);
     }
 
-    fn on_reinstall(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+    fn onReinstall(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
         const p = self.priv();
 
         var argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -504,14 +507,14 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Reinstalling package"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &on_reinstall_complete,
+                .on_complete = &onReinstall_complete,
                 .privileged = true,
                 .ctx = self,
             });
         }
     }
 
-    fn on_add_ignore(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+    fn onAddIgnore(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
         const p = self.priv();
 
         var argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -526,7 +529,7 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Adding to package ignore"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &on_reinstall_complete,
+                .on_complete = &onReinstall_complete,
                 .privileged = true,
                 .ctx = self,
             });
@@ -548,7 +551,7 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Adding to package to hold"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &on_reinstall_complete,
+                .on_complete = &onReinstall_complete,
                 .privileged = true,
                 .ctx = self,
             });
@@ -568,7 +571,7 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Making Package Explicit"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &on_reinstall_complete,
+                .on_complete = &onReinstall_complete,
                 .privileged = true,
                 .ctx = self,
             });
@@ -588,14 +591,14 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Making Package Dependency"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &on_reinstall_complete,
+                .on_complete = &onReinstall_complete,
                 .privileged = true,
                 .ctx = self,
             });
         }
     }
 
-    fn on_reinstall_complete(ctx: *anyopaque, success: bool) void {
+    fn onReinstall_complete(ctx: *anyopaque, success: bool) void {
         _ = success;
         _ = ctx;
     }
