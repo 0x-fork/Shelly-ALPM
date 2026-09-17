@@ -92,7 +92,7 @@ fn commandLine(
         }
 
         if (deep_link.extractLocalFlatpakFile(arg, &app_path_buffer)) |app_path| {
-                requested_app_path = app_path;
+            requested_app_path = app_path;
         }
     }
 

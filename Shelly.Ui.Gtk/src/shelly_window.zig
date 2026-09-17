@@ -608,13 +608,13 @@ pub const ShellyWindow = extern struct {
 
     pub fn openFlatpakLocalFile(self: *ShellyWindow, path: [:0]const u8) bool {
         const p = self.private();
-    
+
         if (gtk.Widget.getVisible(p.lockout_overlay.as(gtk.Widget)) != 0)
             return false;
-    
+
         if (!self.canShowTopLevelPage("flatpak"))
             return false;
-    
+
         p.flatpak_page.openLocalFile(path);
         return self.showTopLevelPage("flatpak");
     }

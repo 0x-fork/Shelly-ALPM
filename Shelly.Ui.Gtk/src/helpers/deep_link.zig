@@ -17,7 +17,6 @@ pub const PageTarget = enum {
 };
 
 pub fn extractLocalFlatpakFile(arg: []const u8, path_buffer: *[max_file_path_len + 1]u8) ?[:0]const u8 {
-
     if (std.mem.startsWith(u8, arg, file_uri_prefix)) {
         const path = fileUriToPath(arg, path_buffer) orelse return null;
         if (!hasFlatpakFileSuffix(path)) return null;
@@ -38,7 +37,10 @@ fn hasFlatpakFileSuffix(path: []const u8) bool {
         std.ascii.endsWithIgnoreCase(path, flatpak_bundle_suffix);
 }
 
-fn fileUriToPath(uri: []const u8, path_buffer: *[max_file_path_len + 1]u8,) ?[]const u8 {
+fn fileUriToPath(
+    uri: []const u8,
+    path_buffer: *[max_file_path_len + 1]u8,
+) ?[]const u8 {
     const rest = uri[file_uri_prefix.len..];
 
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;

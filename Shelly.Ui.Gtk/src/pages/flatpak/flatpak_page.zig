@@ -100,7 +100,6 @@ pub const FlatpakPage = extern struct {
         self.navigateTo(.local);
     }
 
-
     fn init(self: *Self, _: *Class) callconv(.c) void {
         gtk.Widget.initTemplate(self.as(gtk.Widget));
         const p = self.priv();
