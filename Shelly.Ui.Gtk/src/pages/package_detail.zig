@@ -4,14 +4,14 @@ const gtk = bindings.gtk;
 const gio = bindings.gio;
 const glib = bindings.glib;
 const gobject = bindings.gobject;
-const gdk = bindings.gdk;
 const c_string = @import("../helpers/c_string.zig");
 const support = @import("support.zig");
 const ShellyCli = @import("../services/shelly_cli.zig").ShellyCli;
 const Package = @import("../models/packages.zig").Package;
 const SizeConverter = @import("../helpers/size_converts.zig").SizeConverter;
 const ShellyWindow = @import("../shelly_window.zig").ShellyWindow;
-const ShellyOperation = @import("../services/shelly_operation.zig").ShellyOperation;
+const Option = @import("../services/shelly_operation.zig").Option;
+const MultiSelectDialog = @import("../dialog/page/multiselect.zig").MultiSelectDialog;
 const translations = @import("../helpers/translations.zig");
 
 pub const PackageDetail = extern struct {
@@ -33,6 +33,9 @@ pub const PackageDetail = extern struct {
         add_hold_action: *gio.SimpleAction,
         add_explicit_action: *gio.SimpleAction,
         mark_dependency_action: *gio.SimpleAction,
+        install_opt_deps_action: *gio.SimpleAction,
+
+        current_package: ?Package,
 
         back_button: *gtk.Button,
         actions_button: *gtk.MenuButton,
@@ -70,14 +73,16 @@ pub const PackageDetail = extern struct {
         p.arena = null;
         p.debounce_source = 0;
         p.pending_len = 0;
+        p.current_package = null;
 
         const group = gio.SimpleActionGroup.new();
 
         p.reinstall_action = addAction(self, group, "reinstall", &onReinstall);
         p.add_ignore_action = addAction(self, group, "addignore", &onAddIgnore);
-        p.add_hold_action = addAction(self, group, "addhold", &on_add_hold);
-        p.add_explicit_action = addAction(self, group, "addexplicit", &on_add_explicit);
-        p.mark_dependency_action = addAction(self, group, "dependency", &on_mark_dependency);
+        p.add_hold_action = addAction(self, group, "addhold", &onAddHold);
+        p.add_explicit_action = addAction(self, group, "addexplicit", &onAddExplicit);
+        p.mark_dependency_action = addAction(self, group, "dependency", &onMarkDependency);
+        p.install_opt_deps_action = addAction(self, group, "installoptdeps", &onInstallOptDeps);
 
         gtk.Widget.insertActionGroup(self.as(gtk.Widget), "detail", group.as(gio.ActionGroup));
         _ = gtk.Button.signals.clicked.connect(p.back_button, *Self, &onBackClicked, self, .{});
@@ -123,12 +128,13 @@ pub const PackageDetail = extern struct {
         var buf: [256]u8 = undefined;
         gtk.Label.setLabel(p.name_label, c_string.cstr(&buf, name));
         gtk.Label.setLabel(p.description_label, translations._("Loading..."));
-        clear_box(p.spec_box);
-        clear_box(p.sections_box);
+        clearBox(p.spec_box);
+        clearBox(p.sections_box);
         gio.SimpleAction.setEnabled(p.reinstall_action, @intFromBool(is_installed));
         gio.SimpleAction.setEnabled(p.add_explicit_action, @intFromBool(is_installed));
         gio.SimpleAction.setEnabled(p.mark_dependency_action, @intFromBool(is_installed));
         gio.SimpleAction.setEnabled(p.add_hold_action, @intFromBool(is_installed));
+        gio.SimpleAction.setEnabled(p.install_opt_deps_action, 0);
         if (p.debounce_source != 0) {
             _ = glib.Source.remove(p.debounce_source);
             p.debounce_source = 0;
@@ -173,18 +179,18 @@ pub const PackageDetail = extern struct {
             return;
         };
 
-        post_result(page, parsed.value, arena_ptr, gen);
+        postResult(page, parsed.value, arena_ptr, gen);
     }
 
-    const Result = struct { page: *Self, package: Package, opt: bool, arena: *std.heap.ArenaAllocator, generation: u64 };
+    const Result = struct { page: *Self, package: Package, arena: *std.heap.ArenaAllocator, generation: u64 };
 
-    fn post_result(page: *Self, package: Package, arena: *std.heap.ArenaAllocator, gen: u64) void {
+    fn postResult(page: *Self, package: Package, arena: *std.heap.ArenaAllocator, gen: u64) void {
         const r = std.heap.c_allocator.create(Result) catch {
             arena.deinit();
             std.heap.c_allocator.destroy(arena);
             return;
         };
-        r.* = .{ .page = page, .package = package, .opt = false, .arena = arena, .generation = gen };
+        r.* = .{ .page = page, .package = package, .arena = arena, .generation = gen };
         _ = glib.idleAdd(&onComplete, r);
     }
 
@@ -204,12 +210,13 @@ pub const PackageDetail = extern struct {
             std.heap.c_allocator.destroy(old);
         }
         p.arena = r.arena;
-
-        populate(r.page, r.package, r.opt);
+        p.current_package = r.package;
+        gio.SimpleAction.setEnabled(p.install_opt_deps_action, @intFromBool(r.package.OptDepends.len > 0));
+        populate(r.page, r.package);
         return 0;
     }
 
-    fn populate(self: *Self, package: Package, opt: bool) void {
+    fn populate(self: *Self, package: Package) void {
         const p = self.priv();
         var buf: [512]u8 = undefined;
 
@@ -220,7 +227,7 @@ pub const PackageDetail = extern struct {
 
         var sbuf: [32]u8 = undefined;
 
-        clear_box(p.spec_box);
+        clearBox(p.spec_box);
         addSpecRow(p.spec_box, translations._("Version"), package.Version);
         addSpecRow(p.spec_box, translations._("Repository"), package.Repository);
         addSpecRow(p.spec_box, translations._("Installed Size"), SizeConverter.convert_null_term(&sbuf, package.InstalledSize));
@@ -230,7 +237,7 @@ pub const PackageDetail = extern struct {
 
         if (package.Url) |u| if (u.len > 0) addUrlSpecRow(p.spec_box, translations._("URL"), u);
 
-        clear_box(p.sections_box);
+        clearBox(p.sections_box);
         const alloc = (p.arena orelse return).allocator();
 
         addSpecList(p.spec_box, alloc, translations._("Licenses"), package.Licenses);
@@ -246,9 +253,6 @@ pub const PackageDetail = extern struct {
             package.OptDependsInstalled,
         );
         addListSection(p.sections_box, self, translations._("Required By"), package.RequiredBy, null);
-        if (opt){
-           addSpecRow(p.spec_box, translations._("optional"), package.Version);
-        }
     }
 
     fn addSpecRow(box: *gtk.Box, label: []const u8, value: []const u8) void {
@@ -379,7 +383,7 @@ pub const PackageDetail = extern struct {
                 appendInstalledIndicator(row_content, is_installed);
                 gtk.Button.setChild(row_btn, row_content.as(gtk.Widget));
                 const name_owned = std.heap.c_allocator.dupeZ(u8, dep_name) catch continue;
-                gobject.Object.setDataFull(row_btn.as(gobject.Object), "dep-name", name_owned.ptr, &free_dep_name);
+                gobject.Object.setDataFull(row_btn.as(gobject.Object), "dep-name", name_owned.ptr, &freeDepName);
                 gobject.Object.setData(row_btn.as(gobject.Object), "page", page);
                 _ = gtk.Button.signals.clicked.connect(row_btn, ?*anyopaque, &onDepClicked, null, .{});
                 gtk.Box.append(list, row_btn.as(gtk.Widget));
@@ -423,7 +427,7 @@ pub const PackageDetail = extern struct {
         gtk.Box.append(row, icon.as(gtk.Widget));
     }
 
-    fn free_dep_name(ptr: ?*anyopaque) callconv(.c) void {
+    fn freeDepName(ptr: ?*anyopaque) callconv(.c) void {
         const p: [*:0]u8 = @ptrCast(ptr orelse return);
         std.heap.c_allocator.free(std.mem.span(p));
     }
@@ -433,10 +437,10 @@ pub const PackageDetail = extern struct {
         const name: [*:0]const u8 = @ptrCast(name_ptr);
         const page_ptr = gobject.Object.getData(button.as(gobject.Object), "page") orelse return;
         const self: *PackageDetail = @ptrCast(@alignCast(page_ptr));
-        self.navigate_to_dep(std.mem.span(name));
+        self.navigateToDep(std.mem.span(name));
     }
 
-    fn navigate_to_dep(self: *Self, name: []const u8) void {
+    fn navigateToDep(self: *Self, name: []const u8) void {
         const p = self.priv();
 
         const current = p.pending_name[0..p.pending_len];
@@ -507,7 +511,7 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Reinstalling package"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &onReinstall_complete,
+                .on_complete = &onActionComplete,
                 .privileged = true,
                 .ctx = self,
             });
@@ -529,14 +533,14 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Adding to package ignore"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &onReinstall_complete,
+                .on_complete = &onActionComplete,
                 .privileged = true,
                 .ctx = self,
             });
         }
     }
 
-    fn on_add_hold(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+    fn onAddHold(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
         const p = self.priv();
 
         var argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -551,13 +555,14 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Adding to package to hold"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &onReinstall_complete,
+                .on_complete = &onActionComplete,
                 .privileged = true,
                 .ctx = self,
             });
         }
     }
-    fn on_add_explicit(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+
+    fn onAddExplicit(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
         const p = self.priv();
 
         var argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -571,13 +576,14 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Making Package Explicit"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &onReinstall_complete,
+                .on_complete = &onActionComplete,
                 .privileged = true,
                 .ctx = self,
             });
         }
     }
-    fn on_mark_dependency(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+
+    fn onMarkDependency(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
         const p = self.priv();
 
         var argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -591,19 +597,91 @@ pub const PackageDetail = extern struct {
                 .title = translations._("Making Package Dependency"),
                 .argv = argv.items,
                 .packages = &.{&p.pending_name},
-                .on_complete = &onReinstall_complete,
+                .on_complete = &onActionComplete,
                 .privileged = true,
                 .ctx = self,
             });
         }
     }
 
-    fn onReinstall_complete(ctx: *anyopaque, success: bool) void {
-        _ = success;
-        _ = ctx;
+    fn onInstallOptDeps(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
+        const p = self.priv();
+        const pkg = p.current_package orelse return;
+        if (pkg.OptDepends.len == 0) return;
+
+        const alloc = (p.arena orelse return).allocator();
+
+        const options = alloc.alloc(Option, pkg.OptDepends.len) catch return;
+        for (pkg.OptDepends, 0..) |dep, i| {
+            const is_inst = i < pkg.OptDependsInstalled.len and pkg.OptDependsInstalled[i];
+            options[i] = .{
+                .index = i,
+                .name = stripVersion(dep),
+                .description = blk: {
+                    const colon = std.mem.indexOfScalar(u8, dep, ':') orelse break :blk "";
+                    break :blk std.mem.trim(u8, dep[colon + 1 ..], " ");
+                },
+                .is_installed = is_inst,
+                .is_selected = false,
+            };
+        }
+
+        const dialog = MultiSelectDialog.new(
+            alloc,
+            translations._("Select Optional Dependencies to Install"),
+            options,
+            &onOptDepsResponse,
+            self,
+        );
+        gtk.Widget.setHexpand(dialog.as(gtk.Widget), 1);
+        gtk.Widget.setVexpand(dialog.as(gtk.Widget), 1);
+
+        if (support.getWindow(ShellyWindow, self)) |win| {
+            win.showLockout(dialog.as(gtk.Widget));
+        }
     }
 
-    fn clear_box(box: *gtk.Box) void {
+    fn onOptDepsResponse(ctx: ?*anyopaque, confirmed: bool, selected: []const usize) void {
+        const self: *Self = @ptrCast(@alignCast(ctx.?));
+        const p = self.priv();
+        const pkg = p.current_package orelse return;
+
+        if (support.getWindow(ShellyWindow, self)) |win| {
+            win.hideLockout();
+            if (!confirmed or selected.len == 0) return;
+
+            var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer argv.deinit(std.heap.c_allocator);
+            argv.append(std.heap.c_allocator, "install") catch return;
+            argv.append(std.heap.c_allocator, "standard") catch return;
+            for (selected) |idx| {
+                if (idx >= pkg.OptDepends.len) continue;
+                const name = stripVersion(pkg.OptDepends[idx]);
+                const owned = std.heap.c_allocator.dupe(u8, name) catch return;
+                argv.append(std.heap.c_allocator, owned) catch {
+                    std.heap.c_allocator.free(owned);
+                    return;
+                };
+            }
+            defer {
+                for (argv.items[2..]) |s| std.heap.c_allocator.free(s);
+            }
+            if (argv.items.len <= 2) return;
+
+            win.startTransaction(.{
+                .title = translations._("Installing optional dependencies"),
+                .argv = argv.items,
+                .packages = &.{&p.pending_name},
+                .on_complete = &onActionComplete,
+                .privileged = true,
+                .ctx = self,
+            });
+        }
+    }
+
+    fn onActionComplete(_: *anyopaque, _: bool) void {}
+
+    fn clearBox(box: *gtk.Box) void {
         while (gtk.Widget.getFirstChild(box.as(gtk.Widget))) |child| {
             gtk.Box.remove(box, child);
         }
