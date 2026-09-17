@@ -41,6 +41,7 @@ pub const FlatpakPage = extern struct {
         category_list: *gtk.ListBox,
         search_entry: *gtk.SearchEntry,
         install_view: *FlatpakInstallView,
+        local_view: *FlatpakInstallLocalView,
         remove_view: *FlatpakRemoveView,
         loaded: bool,
         var offset: c_int = 0;
@@ -93,6 +94,12 @@ pub const FlatpakPage = extern struct {
         p.install_view.openAppById(app_id);
         self.navigateTo(.install);
     }
+
+    pub fn openLocalFile(self: *Self, path: [:0]const u8) void {
+        self.priv().local_view.setSelectedPath(path);
+        self.navigateTo(.local);
+    }
+
 
     fn init(self: *Self, _: *Class) callconv(.c) void {
         gtk.Widget.initTemplate(self.as(gtk.Widget));
@@ -154,6 +161,7 @@ pub const FlatpakPage = extern struct {
         _ = gtk.Stack.addNamed(p.main_content_stack, remotes.as(gtk.Widget), "remotes");
 
         const local = FlatpakInstallLocalView.new();
+        p.local_view = local;
         _ = gtk.Stack.addNamed(p.main_content_stack, local.as(gtk.Widget), "local");
     }
 
