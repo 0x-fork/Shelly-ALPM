@@ -636,6 +636,7 @@ pub fn build(b: *std.Build) void {
             "AUR dispatcher returns provider selections",
             "AUR handlers can be removed through the manager-facing dispatcher",
             "AUR RPC URL and form encoding matches the C# requests",
+            "AUR availability",
             "AUR suggestions are returned as owned strings",
             "partial info failures preserve packages returned by earlier chunks",
             "PKGBUILD validation combines post-install and homograph findings",
