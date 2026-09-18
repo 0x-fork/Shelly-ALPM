@@ -1610,6 +1610,7 @@ fn renderIsolatedConfiguration(
     try writeTomlArray(writer, "ldflags", configuration.build.ldflags);
     try writeTomlArray(writer, "ltoflags", configuration.build.ltoflags);
     try writeTomlArray(writer, "makeflags", configuration.build.makeflags);
+    try writeTomlArray(writer, "extra_path", configuration.build.extra_path);
     try writer.print("check = {}\nccache = false\ndistcc = false\n\n", .{configuration.build.check});
 
     try writer.writeAll("[package]\n");
@@ -3094,6 +3095,7 @@ test "isolated configuration preserves build policy and forces guest-local desti
         null,
     );
     defer configuration.deinit();
+    configuration.build.extra_path = &.{"/opt/guest-toolchain/bin"};
     const rendered = try renderIsolatedConfiguration(std.testing.allocator, configuration);
     defer std.testing.allocator.free(rendered);
     const parsed = try ShellyBuildConfiguration.initFromBuffers(
@@ -3103,6 +3105,7 @@ test "isolated configuration preserves build policy and forces guest-local desti
     );
     defer parsed.deinit();
     try std.testing.expectEqualStrings(configuration.build.carch, parsed.build.carch);
+    try std.testing.expectEqualStrings("/opt/guest-toolchain/bin", parsed.build.extra_path[0]);
     try std.testing.expectEqualStrings(configuration.build.cflags[0], parsed.build.cflags[0]);
     try std.testing.expectEqualStrings("/build/work", parsed.destinations.build.?);
     try std.testing.expectEqualStrings(isolated_build.guest_artifacts, parsed.destinations.packages.?);

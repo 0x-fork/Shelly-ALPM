@@ -663,9 +663,11 @@ fn decompressSignedPayload(
         .lzo => &.{ "/usr/bin/lzop", "-d", "-q", "-c", "--", source_path },
         .lrz => &.{ "/usr/bin/lrzip", "-q", "-d", "-o", "-", source_path },
     };
+    var environment = try self.environ.createMap(self.allocator);
+    defer environment.deinit();
     var child = try std.process.spawn(self.io, .{
         .argv = argv,
-        .environ_map = null,
+        .environ_map = &environment,
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .ignore,

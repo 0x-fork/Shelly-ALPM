@@ -445,3 +445,26 @@ Document any known issues that are being tracked:
 1.
 2.
 3.
+
+## Native build PATH (issue #1931)
+
+- [ ] Run a minimal reviewed PKGBUILD that launches an intentionally missing
+  executable using Rust `Command::spawn`. With an inaccessible temporary
+  directory appended to the invoking shell's PATH, confirm the build sees only
+  the configured build PATH and the lookup returns `NotFound`, not
+  `PermissionDenied`. Restore the temporary directory's permissions afterward.
+- [ ] Repeat through a GUI AUR operation launched with pkexec and through CLI
+  dependency synchronization. Capture the non-root build PATH; it must not
+  contain the elevated coordinator's private directories.
+- [ ] Put a custom tool in an absolute directory named in `[build] extra_path`.
+  Confirm metadata review, `--makesrcinfo`, lifecycle functions, and native
+  packaging helpers can use it, with configured tools preceding system tools.
+- [ ] Check system/user overrides and `extra_path = []`. A configured missing,
+  non-directory, or inaccessible entry must report its path before PKGBUILD
+  execution. Confirm Perl tools and ccache/distcc precedence remain correct.
+- [ ] With Landlock enabled, confirm PATH additions alone do not grant access
+  outside the sandbox allow-list; add explicit sandbox grants and retry.
+- [ ] In an isolated build, confirm extra directories are interpreted inside
+  the guest; host-only directories must produce a clear error, without mounts.
+- [ ] Rebuild `scx-scheds-git` through the GUI on the affected system and verify
+  the intentionally missing formatter no longer causes errno 13.
