@@ -88,6 +88,7 @@ pub fn build(b: *std.Build) void {
             "isolated source public keys",
             "isolated child arguments",
             "isolated dependency review",
+            "isolated configuration preserves build policy",
         },
     });
     const run_builder_tests = b.addRunArtifact(builder_tests);

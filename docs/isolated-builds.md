@@ -142,3 +142,9 @@ in the foreground before starting Shelly as the background process under test:
 ```sh
 Shelly.Cli.Zig/scripts/test-isolated-cancellation.sh
 ```
+
+Native build PATH additions from `[build] extra_path` in `shellybuild.conf` are
+preserved in the generated guest configuration. They refer to paths inside the
+guest and must exist there; they do not create host bind mounts. A host-only
+custom toolchain path must be removed from the effective configuration before
+an isolated build. See [build PATH configuration](shellybuild.conf.md#build-executable-search-path).

@@ -93,7 +93,7 @@ fn tidyPackage(self: *PackageBuilder, package_build: *const PackageBuild, pkgdir
         for (flags) |flag| try command.append(self.allocator, flag);
         try command.appendSlice(self.allocator, &.{ "-o", output_path, "--" });
         try command.append(self.allocator, path);
-        var result = try process_runner.runWithEnvironment(
+        var result = try process_runner.runWithBuildEnvironment(
             self.allocator,
             self.io,
             self.environ,
