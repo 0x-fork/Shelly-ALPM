@@ -360,6 +360,18 @@ package first); for bash and zsh use a clean shell, and regenerate
 - [ ] Root/sudo operations work correctly
 - [ ] Permission errors are handled gracefully
 - [ ] User is prompted for elevation when needed
+- [ ] `zig build --build-file Shelly.Cli.Zig/build.zig isolated-build-test`
+  passes under umasks `0022`, `0007`, `0027`, and `0077`, preserving reviewed
+  file modes, guest traversal permissions, readable configuration, and the
+  private host operation boundary
+- [ ] From an authenticated normal-user sudo session,
+  `Shelly.Cli.Zig/scripts/test-isolated-build.sh` passes all four coordinator
+  umasks through real nspawn, checks UID/GID 1000 and guest configuration,
+  exports artifacts to the invoking user, and removes operation roots;
+  exit `77` means skipped, not passed
+- [ ] Build the pinned endcord PKGBUILD with `--isolated` using the rebuilt
+  CLI under coordinator umasks `0022` and `0077`; validate the exported
+  archives without installing them and record the recipe revision/source hash
 - [ ] `Shelly.Cli.Zig/scripts/test-elevation-cancellation.sh` passes without
   privileges for both SIGINT and SIGTERM
 - [ ] From a normal user session with a working elevator,
