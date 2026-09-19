@@ -110,10 +110,12 @@ pub fn build(b: *std.Build) void {
             "reviewed inputs are materialized with exact bytes and permissions",
             "staged reviewed inputs preserve the host digest and reject real changes",
             "isolated public source key bundle is readable under restrictive umasks",
+            "isolated guest traversal permissions",
+            "isolated configuration permissions",
         },
     });
     const isolated_test_step = b.step("isolated-build-test", "Test reviewed staging and integrity under restrictive umasks");
-    for ([_][]const u8{ "0022", "0007", "0077" }) |mask| {
+    for ([_][]const u8{ "0022", "0007", "0027", "0077" }) |mask| {
         // Each runner inherits its own umask; never mutate it in concurrent Zig tests.
         const run_isolated_tests = b.addSystemCommand(&.{
             "bash", "-c", "umask \"$1\"; exec \"$2\"", "isolated-build-test", mask,
