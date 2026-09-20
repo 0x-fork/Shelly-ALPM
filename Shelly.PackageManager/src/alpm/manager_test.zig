@@ -2529,7 +2529,7 @@ test "install_local_packages installs multiple archives in a DB-only transaction
 
     // libalpm rejects package commit transactions for unprivileged processes,
     // even when DBONLY confines the mutation to a temporary database.
-    if (builtin.os.tag != .linux or std.os.linux.geteuid() != 0) return;
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() != 0) return error.SkipZigTest;
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
@@ -2559,7 +2559,7 @@ test "install_local_packages installs multiple archives in a DB-only transaction
 test "install_local_packages skips a duplicate target and emits information" {
     const allocator = testing.allocator;
 
-    if (builtin.os.tag != .linux or std.os.linux.geteuid() != 0) return;
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() != 0) return error.SkipZigTest;
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
@@ -2583,7 +2583,7 @@ test "install_local_packages skips a duplicate target and emits information" {
 
     const args = capture.args orelse return error.TestFailed;
     try testing.expectEqual(libalpm.EventType.failed_add_local_package, args.event_type);
-    try testing.expectEqualStrings("Failed to add local package.", args.message);
+    try testing.expectEqualStrings("Could not add the selected local package archive to the transaction.", args.message);
     try testing.expect((try mgr.get_single_installed_package("shelly-local-duplicate")) != null);
 }
 
@@ -2817,7 +2817,7 @@ test "remove_packages removes an installed package in a DB-only transaction when
 
     // libalpm rejects removal transactions for unprivileged processes even
     // when DBONLY confines the mutation to this temporary database.
-    if (builtin.os.tag != .linux or std.os.linux.geteuid() != 0) return;
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() != 0) return error.SkipZigTest;
 
     // DBPath already points at the isolated workspace. Passing it again as the
     // non-root temp path would replace its local database with a symlink.
