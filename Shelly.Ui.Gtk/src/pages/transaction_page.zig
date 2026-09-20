@@ -223,12 +223,12 @@ pub const TransactionPage = extern struct {
 
         const started = if (request.privileged) op.startPrivileged(argv) else op.start(argv);
         started catch {
-            append_terminal(self, translations._("Failed to start operation."));
+            append_terminal(self, translations._("Could not start the requested operation."));
             op.threaded.deinit();
             std.heap.c_allocator.destroy(op);
             p.operation = null;
             p.finished = true;
-            self.showFinishedUI(.failed, translations._("Failed to start operation."));
+            self.showFinishedUI(.failed, translations._("Could not start the requested operation."));
             if (p.on_complete) |cb| {
                 if (p.on_complete_ctx) |ctx| cb(ctx, false);
             }
@@ -356,8 +356,12 @@ pub const TransactionPage = extern struct {
             .err => |e| {
                 append_terminal(self, e.message);
                 const p = self.priv();
-                if (p.failure_message == null) {
-                    if (p.arena) |arena| p.failure_message = arena.allocator().dupe(u8, e.message) catch null;
+                if (p.arena) |arena| {
+                    const previous = p.failure_message orelse "";
+                    if (std.mem.indexOf(u8, previous, e.message) == null)
+                        p.failure_message = std.fmt.allocPrint(arena.allocator(), "{s}{s}{s}", .{
+                            previous, if (previous.len > 0) "\n\n" else "", e.message,
+                        }) catch p.failure_message;
                 }
             },
             .alpm_progress => |pr| {
@@ -623,11 +627,11 @@ pub const TransactionPage = extern struct {
             .failed => {
                 gtk.Widget.addCssClass(p.close_button.as(gtk.Widget), "destructive-action");
                 gtk.Button.setLabel(p.close_button, translations._("Close"));
-                setLabel(p.title_label, translations._("Transaction Failed"));
+                setLabel(p.title_label, translations._("Operation failed"));
             },
             .cancelled => {
                 gtk.Button.setLabel(p.close_button, translations._("Close"));
-                setLabel(p.title_label, translations._("Transaction Cancelled"));
+                setLabel(p.title_label, translations._("Operation cancelled"));
             },
         }
 
@@ -646,20 +650,20 @@ pub const TransactionPage = extern struct {
 
         const outcome: Outcome = if (p.cancelled)
             .cancelled
-        else if (exit_code == 0)
+        else if (exit_code == 0 and p.failure_message == null)
             .success
         else
             .failed;
 
         switch (outcome) {
-            .cancelled => self.showFinishedUI(outcome, translations._("The operation was cancelled.")),
+            .cancelled => self.showFinishedUI(outcome, translations._("Operation cancelled.")),
             .success => self.showFinishedUI(outcome, translations._("All operations finished successfully.")),
             .failed => {
                 var fail_buf: [128]u8 = undefined;
                 const fallback = if (p.privileged and (exit_code == 126 or exit_code == 127))
                     translations._("Permission to manage packages was not granted. Try again and approve the authorization request to continue.")
                 else
-                    std.fmt.bufPrint(&fail_buf, "{s} ({s} {d})", .{ translations._("Operation failed"), translations._("exit"), exit_code }) catch translations._("Operation failed");
+                    std.fmt.bufPrint(&fail_buf, "{s} ({s} {d})", .{ translations._("Could not complete the requested operation."), translations._("exit"), exit_code }) catch translations._("Could not complete the requested operation.");
                 const detail = p.failure_message orelse fallback;
                 const end = std.mem.indexOf(u8, detail, "\n\nTechnical details:") orelse
                     std.mem.indexOf(u8, detail, "\nTechnical details:") orelse detail.len;
@@ -675,7 +679,7 @@ pub const TransactionPage = extern struct {
 
         if (p.on_complete) |cb| {
             log.debug("on_complete set, ctx={}", .{p.on_complete_ctx != null});
-            if (p.on_complete_ctx) |c| cb(c, exit_code == 0 and !p.cancelled);
+            if (p.on_complete_ctx) |c| cb(c, outcome == .success);
         } else {
             log.debug("on_complete is NULL", .{});
         }
