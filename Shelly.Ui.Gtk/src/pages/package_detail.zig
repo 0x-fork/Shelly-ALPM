@@ -629,6 +629,7 @@ pub const PackageDetail = extern struct {
         const dialog = MultiSelectDialog.new(
             alloc,
             translations._("Select Optional Dependencies to Install"),
+            translations._("Cancel"),
             options,
             &onOptDepsResponse,
             self,

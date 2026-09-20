@@ -57,6 +57,7 @@ pub const MultiSelectDialog = extern struct {
     pub fn new(
         alloc: std.mem.Allocator,
         title: []const u8,
+        cancel_label: [:0]const u8,
         options: []const Option,
         on_response: ResponseFn,
         ctx: ?*anyopaque,
@@ -66,10 +67,11 @@ pub const MultiSelectDialog = extern struct {
 
         var tbuf: [512]u8 = undefined;
         gtk.Label.setLabel(p.title_label, c_string.cstr(&tbuf, title));
+        gtk.Button.setLabel(p.cancel_button, cancel_label);
 
         p.on_response = on_response;
         p.ctx = ctx;
-        
+
         p.checks = alloc.alloc(*gtk.CheckButton, options.len) catch &.{};
         p.indices = alloc.alloc(usize, options.len) catch &.{};
         p.checks_len = if (p.checks.len == options.len and p.indices.len == options.len) options.len else 0;
