@@ -657,6 +657,7 @@ pub const PackageDetail = extern struct {
             argv.append(std.heap.c_allocator, "standard") catch return;
             for (selected) |idx| {
                 if (idx >= pkg.OptDepends.len) continue;
+                if (idx < pkg.OptDependsInstalled.len and pkg.OptDependsInstalled[idx]) continue;
                 const name = stripVersion(pkg.OptDepends[idx]);
                 const owned = std.heap.c_allocator.dupe(u8, name) catch return;
                 argv.append(std.heap.c_allocator, owned) catch {
@@ -672,7 +673,7 @@ pub const PackageDetail = extern struct {
             win.startTransaction(.{
                 .title = translations._("Installing optional dependencies"),
                 .argv = argv.items,
-                .packages = &.{&p.pending_name},
+                .packages = argv.items[2..],
                 .on_complete = &onActionComplete,
                 .privileged = true,
                 .ctx = self,
