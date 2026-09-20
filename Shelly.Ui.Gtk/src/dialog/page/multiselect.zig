@@ -81,7 +81,7 @@ pub const MultiSelectDialog = extern struct {
 
             const check = gtk.CheckButton.new();
             gtk.CheckButton.setActive(check, @intFromBool(opt.is_selected or opt.is_installed));
-            gtk.Widget.setValign(check.as(gtk.Widget), .start);
+            gtk.Widget.setValign(check.as(gtk.Widget), .center);
             gtk.Box.append(row, check.as(gtk.Widget));
 
             // name + description stacked
@@ -106,7 +106,14 @@ pub const MultiSelectDialog = extern struct {
             }
 
             gtk.Box.append(row, textbox.as(gtk.Widget));
-            gtk.Box.append(p.options_box, row.as(gtk.Widget));
+
+            const row_btn = gtk.Button.new();
+            gtk.Widget.addCssClass(row_btn.as(gtk.Widget), "flat");
+            gtk.Widget.setHalign(row_btn.as(gtk.Widget), .fill);
+            gtk.Widget.setCanTarget(check.as(gtk.Widget), 0);
+            gtk.Button.setChild(row_btn, row.as(gtk.Widget));
+            _ = gtk.Button.signals.clicked.connect(row_btn, *gtk.CheckButton, &onRowClicked, check, .{});
+            gtk.Box.append(p.options_box, row_btn.as(gtk.Widget));
 
             if (p.checks_len > 0) {
                 p.checks[i] = check;
@@ -115,6 +122,10 @@ pub const MultiSelectDialog = extern struct {
         }
 
         return self;
+    }
+
+    fn onRowClicked(_: *gtk.Button, check: *gtk.CheckButton) callconv(.c) void {
+        gtk.CheckButton.setActive(check, @intFromBool(gtk.CheckButton.getActive(check) == 0));
     }
 
     fn on_confirm(self: *Self) callconv(.c) void {
