@@ -4,6 +4,7 @@ const package_manifest = @import("build.zig.zon");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const diagnostics = b.dependency("shelly_diagnostics", .{ .target = target, .optimize = optimize }).module("diagnostics");
     const flatpak_backend_path = b.option(
         []const u8,
         "flatpak-backend-path",
@@ -25,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    cli.addImport("diagnostics", diagnostics);
     cli.addImport("Zigalpm", zigalpm);
     cli.addOptions("build_options", build_options);
 
@@ -33,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    executable_module.addImport("diagnostics", diagnostics);
     executable_module.addImport("Shelly_Cli_Zig", cli);
     executable_module.addImport("Zigalpm", zigalpm);
 
@@ -40,6 +43,7 @@ pub fn build(b: *std.Build) void {
         .name = "shelly",
         .root_module = executable_module,
     });
+    executable.root_module.addImport("diagnostics", diagnostics);
     b.installArtifact(executable);
 
     const run_command = b.addRunArtifact(executable);
@@ -77,6 +81,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    builder_test_module.addImport("diagnostics", diagnostics);
     builder_test_module.addImport("Zigalpm", zigalpm);
     builder_test_module.addOptions("build_options", build_options);
     const builder_tests = b.addTest(.{
@@ -101,6 +106,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    isolated_test_module.addImport("diagnostics", diagnostics);
     isolated_test_module.addImport("Zigalpm", zigalpm);
     const isolated_tests = b.addTest(.{
         .name = "isolated-build-test",

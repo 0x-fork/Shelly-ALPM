@@ -167,7 +167,7 @@ pub const Client = struct {
     ) !models.Response {
         const error_type = try self.allocator.dupe(u8, "error");
         errdefer self.allocator.free(error_type);
-        const message = try self.allocator.dupe(u8, @errorName(err));
+        const message = try @import("diagnostics").format(self.allocator, err, .{ .operation = "the AUR package information query", .path = self.rpc_url });
         errdefer self.allocator.free(message);
         const results = try all_packages.toOwnedSlice(self.allocator);
         self.allocator.free(response_type);
@@ -374,7 +374,7 @@ const HttpOperationScope = struct {
     fn fail(self: *HttpOperationScope) void {
         if (self.operation) |*operation| operation.reportError(
             if (operation.isCancelled()) error.Cancelled else error.AurHttpOperationFailed,
-            if (operation.isCancelled()) "AUR HTTP operation cancelled" else "AUR HTTP operation failed",
+            if (operation.isCancelled()) "Operation cancelled." else "Could not complete the AUR request to the configured server.",
             "aur-http",
             null,
             false,
@@ -615,7 +615,8 @@ test "partial info failures preserve packages returned by earlier chunks" {
     var partial = try client.partialInfoError(&packages, response_type, error.Timeout);
     defer partial.deinit(allocator);
     try std.testing.expectEqualStrings("error", partial.response_type);
-    try std.testing.expectEqualStrings("Timeout", partial.error_message.?);
+    try std.testing.expect(std.mem.indexOf(u8, partial.error_message.?, "Technical details: Timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, partial.error_message.?, "aur.archlinux.org") != null);
     try std.testing.expectEqual(@as(usize, 1), partial.results.len);
     try std.testing.expectEqualStrings("first", partial.results[0].name);
 }

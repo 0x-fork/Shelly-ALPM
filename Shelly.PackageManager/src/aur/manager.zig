@@ -1101,7 +1101,7 @@ pub const Manager = struct {
                 const owned_name = try self.allocator.dupe(u8, package_name);
                 failures.append(self.allocator, .{
                     .package_name = owned_name,
-                    .reason = "No matching package files produced by builder",
+                    .reason = "The build for the requested package produced no matching package archive in the build output directory. Check the package() output and expected package names in the build details.",
                 }) catch |err| {
                     self.allocator.free(owned_name);
                     return err;
@@ -1116,10 +1116,10 @@ pub const Manager = struct {
             self.raisePackageProgress(.aur_install_done, package_name, current, plans.items.len, "");
             for (requested_names) |requested_name|
                 self.updateVcsStoreForPackage(requested_name, prepared.pkgbuild_path) catch |err|
-                    self.raiseBestEffortFailure(requested_name, "Failed to update VCS metadata", err);
+                    self.raiseBestEffortFailure(requested_name, "The package operation completed, but VCS version metadata could not be updated for the requested package. Future update checks may be incomplete.", err);
             self.installSelectedOptionalDependencies(package_name, selected_optional) catch |err| {
                 try self.checkCancelled();
-                self.raiseBestEffortFailure(package_name, "Failed to install some optional dependencies", err);
+                self.raiseBestEffortFailure(package_name, "Some optional dependencies could not be installed. Review the transaction results to see which dependencies were installed.", err);
             };
             try self.checkCancelled();
             self.removeBuildOnlyDependencies(package_name, @ptrCast(build_only), current, plans.items.len);
@@ -1187,7 +1187,7 @@ pub const Manager = struct {
         const reason = if (reviews.declined.contains(plan.prepared.package_base))
             "review declined"
         else
-            "required AUR dependency review declined";
+            "Installation cancelled because review of a required AUR dependency was declined.";
         for (plan.requested_names.items) |name| {
             if (containsConst(reviews.skipped.items, name)) continue;
             const owned_name = try self.allocator.dupe(u8, name);
@@ -1413,13 +1413,13 @@ pub const Manager = struct {
         try self.installCollection(&collection);
         self.raisePackageProgress(.aur_build_start, package_name, 1, 1, "Building package");
         const artifacts = self.buildPreparedPackage(&prepared, &.{package_name}, true) catch {
-            self.raisePackageProgress(.aur_package_failed, package_name, 1, 1, "Failed to build package");
+            self.raisePackageProgress(.aur_package_failed, package_name, 1, 1, "Could not build the requested package. See the build details for the failed stage and command output.");
             return error.BuildFailed;
         };
         defer package_builder.deinitArtifacts(self.allocator, artifacts);
         self.raisePackageProgress(.aur_build_done, package_name, 1, 1, "");
         if (artifacts.len == 0) {
-            self.raisePackageProgress(.aur_package_failed, package_name, 1, 1, "No matching package files produced by builder");
+            self.raisePackageProgress(.aur_package_failed, package_name, 1, 1, "The build for the requested package produced no matching package archive in the build output directory. Check the package() output and expected package names in the build details.");
             return error.NoBuiltPackages;
         }
         self.raisePackageProgress(.aur_install_start, package_name, 1, 1, "");
@@ -1530,15 +1530,15 @@ pub const Manager = struct {
         const artifacts = self.buildPreparedPackage(dependency, &.{dependency.package_name}, false) catch |err| {
             try self.checkCancelled();
             if (err == error.PkgbuildReviewDeclined and self.upgrade_reviews != null) return err;
-            const failure_message = std.fmt.allocPrint(self.allocator, "Failed to build AUR dependency {s}: {s}", .{ dependency.package_name, @errorName(err) }) catch null;
+            const failure_message = std.fmt.allocPrint(self.allocator, "Could not build AUR dependency {0f} required by the requested package. {1s} See the dependency build details.\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(dependency.package_name), @import("diagnostics").cause(err), @errorName(err) }) catch null;
             defer if (failure_message) |message| self.allocator.free(message);
-            self.raisePackageProgress(.aur_package_failed, dependency.package_name, 1, 1, failure_message orelse "Failed to build AUR dependency");
+            self.raisePackageProgress(.aur_package_failed, dependency.package_name, 1, 1, failure_message orelse "Could not build a required AUR dependency. See the dependency build details.");
             return err;
         };
         defer package_builder.deinitArtifacts(self.allocator, artifacts);
         self.raisePackageProgress(.aur_build_done, dependency.package_name, 1, 1, "");
         if (artifacts.len == 0) {
-            self.raisePackageProgress(.aur_package_failed, dependency.package_name, 1, 1, "No matching package files produced for AUR dependency");
+            self.raisePackageProgress(.aur_package_failed, dependency.package_name, 1, 1, "The build for the requested package produced no matching package archive in the build output directory. Check the package() output and expected package names in the build details.");
             return error.NoBuiltPackages;
         }
         self.raisePackageProgress(.aur_install_start, dependency.package_name, 1, 1, "Installing AUR dependency");
@@ -1601,7 +1601,7 @@ pub const Manager = struct {
         if (installed.items.len == 0) return;
 
         self.raisePackageProgress(.aur_cleanup_start, package_name, current, total, "Removing build-only dependencies");
-        var recoverable_errors = self.alpm.dispatcher.beginRecoverableErrors("Failed to remove build-only dependencies");
+        var recoverable_errors = self.alpm.dispatcher.beginRecoverableErrors("Could not remove the build-only dependencies. Review the remaining dependencies before removing them manually.");
         defer recoverable_errors.deinit();
         self.removeRepoPackages(installed.items, .{}, true, .already_approved) catch {};
         self.raisePackageProgress(.aur_cleanup_done, package_name, current, total, "");
@@ -1673,7 +1673,7 @@ pub const Manager = struct {
         }
         if (repo_names.items.len > 0) {
             self.raiseBuildLine(parent, "Installing optional dependencies from repositories", false);
-            var recoverable_errors = self.alpm.dispatcher.beginRecoverableErrors("Failed to configure repository optional dependencies");
+            var recoverable_errors = self.alpm.dispatcher.beginRecoverableErrors("Could not configure repository optional dependencies for the requested package.");
             defer recoverable_errors.deinit();
             if (self.installRepoPackagesConst(repo_names.items, .{})) |_| {
                 for (repo_names.items) |name| {
@@ -1690,13 +1690,13 @@ pub const Manager = struct {
             const providers = self.aur_client.findProviders(name) catch continue;
             defer rpc.deinitStrings(self.allocator, providers);
             const chosen = self.chooseProvider(name, providers) orelse {
-                const message = try std.fmt.allocPrint(self.allocator, "Optional dependency '{s}' has no selected AUR provider", .{name});
+                const message = try std.fmt.allocPrint(self.allocator, "Optional dependency '{0f}' has no selected AUR provider. Select a provider or deselect this optional dependency.", .{@import("diagnostics").safe(name)});
                 defer self.allocator.free(message);
                 self.dispatcher.raiseError(.{ .message = message });
                 continue;
             };
             if (self.isDeclinedPackage(chosen)) continue;
-            var recoverable_errors = self.alpm.dispatcher.beginRecoverableErrors("Failed to configure optional AUR dependency");
+            var recoverable_errors = self.alpm.dispatcher.beginRecoverableErrors("Could not configure an optional AUR dependency.");
             defer recoverable_errors.deinit();
             self.installPackages(&.{chosen}) catch continue;
             const chosen_z = try self.allocator.dupeZ(u8, chosen);
@@ -2605,7 +2605,7 @@ pub const Manager = struct {
             defer self.allocator.free(path);
             _ = std.Io.Dir.cwd().statFile(self.io(), path, .{}) catch continue;
             if (self.removeCacheDirectory(path) catch false) continue;
-            const message = std.fmt.allocPrint(self.allocator, "Failed to clean build artifact directory {s}", .{path}) catch continue;
+            const message = std.fmt.allocPrint(self.allocator, "Could not remove build artifacts from {0f}. The remaining files can be reviewed after the build.", .{@import("diagnostics").safe(path)}) catch continue;
             defer self.allocator.free(message);
             self.raiseInfo(.debug_output, null, message, null, null);
         }
@@ -2876,8 +2876,8 @@ pub const Manager = struct {
     }
 
     fn raiseBestEffortFailure(self: *Self, package_name: []const u8, context: []const u8, err: anyerror) void {
-        const message = std.fmt.allocPrint(self.allocator, "[Shelly] Warning: {s}: {s}", .{ context, @errorName(err) }) catch {
-            self.raiseBuildLine(package_name, "[Shelly] Warning: a best-effort AUR operation failed", true);
+        const message = std.fmt.allocPrint(self.allocator, "Could not complete optional AUR step {0f} for the requested package. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(context), @import("diagnostics").cause(err), @errorName(err) }) catch {
+            self.raiseBuildLine(package_name, "Could not complete an optional AUR step.", true);
             return;
         };
         defer self.allocator.free(message);
@@ -2962,7 +2962,7 @@ const OperationScope = struct {
                 } else {
                     operation.reportError(
                         error.AurOperationFailed,
-                        "AUR operation failed",
+                        "Could not complete the package operation.",
                         "aur",
                         null,
                         false,
@@ -3192,22 +3192,22 @@ fn appendShellyBuildArguments(
 
 fn buildFailureReason(err: anyerror) []const u8 {
     return switch (err) {
-        error.InvokingUserUnavailable => "Cannot build safely: the elevated process has no non-root invoking user",
-        error.ReviewedPkgbuildChanged => "Reviewed PKGBUILD inputs changed before the build subprocess started",
-        error.Cancelled => "Package build was cancelled",
-        else => "Failed to build package",
+        error.InvokingUserUnavailable => "Could not identify a regular user to run the build. Start Shelly from your regular user session and allow Shelly to request administrator privileges when needed.",
+        error.ReviewedPkgbuildChanged => "The reviewed PKGBUILD inputs changed before the build started. Review the current PKGBUILD and source files again, then restart the build.",
+        error.Cancelled => "Operation cancelled.",
+        else => "Could not build the requested package. See the build details for the failed stage and command output.",
     };
 }
 
 fn preparationFailureReason(err: anyerror) []const u8 {
     return switch (err) {
-        error.UnresolvedPkgbuildVariable => "PKGBUILD contains an unresolved variable",
-        error.MissingPackageName => "PKGBUILD does not declare a package name",
-        error.UnsupportedPackageArchitecture => "PKGBUILD does not support this architecture",
-        error.MissingPkgbuildSourceFile => "PKGBUILD references a missing local source file",
-        error.UnsafePkgbuildSourcePath => "PKGBUILD references an unsafe local source path",
-        error.DownloadFailed => "Failed to download package sources",
-        else => "Failed to prepare package",
+        error.UnresolvedPkgbuildVariable => "Could not prepare the requested package because a PKGBUILD field contains an unresolved expression. Review the selected path and provide metadata Shelly can resolve.",
+        error.MissingPackageName => "Could not prepare the requested package because its PKGBUILD does not declare a package name. Review pkgname in the PKGBUILD.",
+        error.UnsupportedPackageArchitecture => "Could not build the requested package because its PKGBUILD does not support this system’s architecture. Select a package that supports this architecture.",
+        error.MissingPkgbuildSourceFile => "Could not prepare the requested package because a local source is missing. Restore the source referenced by the selected path.",
+        error.UnsafePkgbuildSourcePath => "Could not prepare the requested package because a local source is not a regular file inside the package directory. Review the source path in the PKGBUILD.",
+        error.DownloadFailed => "Could not download the sources for the requested package.",
+        else => "Could not prepare the requested package for building.",
     };
 }
 
@@ -3345,7 +3345,7 @@ test "coordinator child build arguments bind review package set and policies" {
     try std.testing.expect(!containsConst(upgrade.items, "--skip-source-pgp-verification"));
     try std.testing.expect(!containsConst(historical.items, "--skip-source-pgp-verification"));
     try std.testing.expectEqualStrings(
-        "Cannot build safely: the elevated process has no non-root invoking user",
+        "Could not identify a regular user to run the build. Start Shelly from your regular user session and allow Shelly to request administrator privileges when needed.",
         buildFailureReason(error.InvokingUserUnavailable),
     );
 }
@@ -5170,7 +5170,7 @@ test "AUR upgrades skip declined reviews and continue independent packages" {
                     if (args.package_name) |name| {
                         self.skip_count += 1;
                         std.testing.expect(containsConst(self.case.skipped, name)) catch unreachable;
-                        std.testing.expect(std.mem.endsWith(u8, args.message, "review declined")) catch unreachable;
+                        std.testing.expect(std.mem.indexOf(u8, args.message, "declined") != null) catch unreachable;
                     } else {
                         self.summaries += 1;
                         for (self.case.skipped) |name|
@@ -5333,7 +5333,7 @@ test "AUR package failures are emitted after all builds and fail the operation" 
                     } else if (std.mem.eql(u8, code, "aur_package_failed")) {
                         self.failure_statuses += 1;
                         if (self.build_starts != 2) self.emitted_before_all_builds = true;
-                        std.debug.assert(std.mem.eql(u8, status.message, "Failed to build package"));
+                        std.debug.assert(std.mem.eql(u8, status.message, "Could not build the requested package. See the build details for the failed stage and command output."));
                     }
                 },
                 .progress => |progress| {
@@ -5670,7 +5670,7 @@ test "build-only dependencies are removed after a failed build" {
                         self.build_starts += 1;
                     } else if (std.mem.eql(u8, code, "aur_package_failed")) {
                         self.failures += 1;
-                        std.debug.assert(std.mem.eql(u8, status.message, "Failed to build package"));
+                        std.debug.assert(std.mem.eql(u8, status.message, "Could not build the requested package. See the build details for the failed stage and command output."));
                     }
                 },
                 .progress => |progress| {
