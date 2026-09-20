@@ -1152,6 +1152,7 @@ const messagingShellPrelude =
 const virtualMetadataShellPrelude =
     \\__shelly_metadata_reject() {
     \\  printf '%s\n' 'shelly: unsupported privileged package metadata operation' >&2
+    \\  if [ "$#" -gt 0 ]; then printf 'shelly: %s: %q\n' "$1" "${2-}" >&2; fi
     \\  return 97
     \\}
     \\mknod() {
@@ -1254,63 +1255,96 @@ const virtualMetadataShellPrelude =
     \\  return 0
     \\}
     \\install() {
-    \\  local -a __shelly_install_args=() __shelly_operands=()
+    \\  local -a __shelly_original_args=("$@") __shelly_install_args=() __shelly_operands=()
     \\  local __shelly_owner='' __shelly_group='' __shelly_have_owner=0 __shelly_have_group=0
     \\  local __shelly_directory_mode=0 __shelly_no_target_directory=0 __shelly_target_directory=''
-    \\  local __shelly_ambiguous=0 __shelly_value __shelly_source __shelly_destination __shelly_target
+    \\  local __shelly_ambiguous='' __shelly_value __shelly_source __shelly_destination __shelly_target
+    \\  local __shelly_short_options __shelly_option
     \\  while [ "$#" -gt 0 ]; do
     \\    case "$1" in
     \\      --)
     \\        __shelly_install_args+=("$1"); shift
     \\        while [ "$#" -gt 0 ]; do __shelly_install_args+=("$1"); __shelly_operands+=("$1"); shift; done
     \\        break ;;
-    \\      -o|--owner)
-    \\        [ "$#" -ge 2 ] || { __shelly_metadata_reject; return $?; }
-    \\        [ -n "$2" ] || { __shelly_metadata_reject; return $?; }
+    \\      --owner)
+    \\        [ "$#" -ge 2 ] && [ -n "$2" ] || { __shelly_metadata_reject 'install requires a nonempty argument for' "$1"; return $?; }
     \\        __shelly_owner=$2; __shelly_have_owner=1
     \\        shift 2 ;;
-    \\      -g|--group)
-    \\        [ "$#" -ge 2 ] || { __shelly_metadata_reject; return $?; }
-    \\        [ -n "$2" ] || { __shelly_metadata_reject; return $?; }
+    \\      --group)
+    \\        [ "$#" -ge 2 ] && [ -n "$2" ] || { __shelly_metadata_reject 'install requires a nonempty argument for' "$1"; return $?; }
     \\        __shelly_group=$2; __shelly_have_group=1
     \\        shift 2 ;;
     \\      --owner=*)
-    \\        [ -n "${1#*=}" ] || { __shelly_metadata_reject; return $?; }
+    \\        [ -n "${1#*=}" ] || { __shelly_metadata_reject 'install requires a nonempty argument for' "$1"; return $?; }
     \\        __shelly_owner=${1#*=}; __shelly_have_owner=1
     \\        shift ;;
     \\      --group=*)
-    \\        [ -n "${1#*=}" ] || { __shelly_metadata_reject; return $?; }
+    \\        [ -n "${1#*=}" ] || { __shelly_metadata_reject 'install requires a nonempty argument for' "$1"; return $?; }
     \\        __shelly_group=${1#*=}; __shelly_have_group=1
     \\        shift ;;
-    \\      -o?*) __shelly_owner=${1:2}; __shelly_have_owner=1; shift ;;
-    \\      -g?*) __shelly_group=${1:2}; __shelly_have_group=1; shift ;;
-    \\      -m|--mode|-S|--suffix)
-    \\        [ "$#" -ge 2 ] || { __shelly_metadata_reject; return $?; }
+    \\      --mode|--suffix)
+    \\        [ "$#" -ge 2 ] || { __shelly_metadata_reject 'install requires an argument for' "$1"; return $?; }
     \\        __shelly_install_args+=("$1" "$2"); shift 2 ;;
-    \\      -t|--target-directory)
-    \\        [ "$#" -ge 2 ] || { __shelly_metadata_reject; return $?; }
+    \\      --target-directory)
+    \\        [ "$#" -ge 2 ] || { __shelly_metadata_reject 'install requires an argument for' "$1"; return $?; }
     \\        __shelly_target_directory=$2
     \\        __shelly_install_args+=("$1" "$2"); shift 2 ;;
     \\      --target-directory=*)
     \\        __shelly_target_directory=${1#*=}; __shelly_install_args+=("$1"); shift ;;
-    \\      -d|--directory)
+    \\      --directory)
     \\        __shelly_directory_mode=1; __shelly_install_args+=("$1"); shift ;;
-    \\      -T|--no-target-directory)
+    \\      --no-target-directory)
     \\        __shelly_no_target_directory=1; __shelly_install_args+=("$1"); shift ;;
-    \\      -D|-p|--preserve-timestamps|-s|--strip|-v|--verbose|-C|--compare|-b|-Z|--backup|--backup=*|--mode=*|-m?*|-Dm?*)
+    \\      --preserve-timestamps|--strip|--verbose|--compare|--backup|--backup=*|--mode=*|--suffix=*)
     \\        __shelly_install_args+=("$1"); shift ;;
-    \\      -*)
-    \\        __shelly_ambiguous=1; __shelly_install_args+=("$1"); shift ;;
+    \\      --*)
+    \\        __shelly_ambiguous=$1; shift ;;
+    \\      -?*)
+    \\        # Parse clusters like -dm700 and -Dpo42. An option taking a
+    \\        # value consumes the rest of the cluster or the next argument.
+    \\        __shelly_short_options=${1:1}; shift
+    \\        while [ -n "$__shelly_short_options" ]; do
+    \\          __shelly_option=${__shelly_short_options:0:1}
+    \\          __shelly_short_options=${__shelly_short_options:1}
+    \\          case "$__shelly_option" in
+    \\            o|g|m|S|t)
+    \\              if [ -n "$__shelly_short_options" ]; then
+    \\                __shelly_value=$__shelly_short_options; __shelly_short_options=''
+    \\              else
+    \\                [ "$#" -ge 1 ] || { __shelly_metadata_reject 'install requires an argument for' "-$__shelly_option"; return $?; }
+    \\                __shelly_value=$1; shift
+    \\              fi
+    \\              case "$__shelly_option" in
+    \\                o|g)
+    \\                  [ -n "$__shelly_value" ] || { __shelly_metadata_reject 'install requires a nonempty argument for' "-$__shelly_option"; return $?; }
+    \\                  if [ "$__shelly_option" = o ]; then
+    \\                    __shelly_owner=$__shelly_value; __shelly_have_owner=1
+    \\                  else
+    \\                    __shelly_group=$__shelly_value; __shelly_have_group=1
+    \\                  fi ;;
+    \\                *)
+    \\                  if [ "$__shelly_option" = t ]; then __shelly_target_directory=$__shelly_value; fi
+    \\                  __shelly_install_args+=("-$__shelly_option" "$__shelly_value") ;;
+    \\              esac ;;
+    \\            d|T|D|p|s|v|C|b|Z|c)
+    \\              if [ "$__shelly_option" = d ]; then __shelly_directory_mode=1; fi
+    \\              if [ "$__shelly_option" = T ]; then __shelly_no_target_directory=1; fi
+    \\              __shelly_install_args+=("-$__shelly_option") ;;
+    \\            *) __shelly_ambiguous="-$__shelly_option" ;;
+    \\          esac
+    \\        done ;;
     \\      *)
     \\        __shelly_install_args+=("$1"); __shelly_operands+=("$1")
     \\        shift ;;
     \\    esac
     \\  done
-    \\  if { [ "$__shelly_have_owner" -eq 1 ] || [ "$__shelly_have_group" -eq 1 ]; } && [ "$__shelly_ambiguous" -eq 1 ]; then
-    \\    __shelly_metadata_reject; return $?
+    \\  if [ "$__shelly_have_owner" -eq 0 ] && [ "$__shelly_have_group" -eq 0 ]; then
+    \\    /usr/bin/install "${__shelly_original_args[@]}"; return $?
+    \\  fi
+    \\  if [ -n "$__shelly_ambiguous" ]; then
+    \\    __shelly_metadata_reject 'install cannot record ownership with unsupported option' "$__shelly_ambiguous"; return $?
     \\  fi
     \\  /usr/bin/install "${__shelly_install_args[@]}" || return $?
-    \\  if [ "$__shelly_have_owner" -eq 0 ] && [ "$__shelly_have_group" -eq 0 ]; then return 0; fi
     \\  __shelly_record_install_target() {
     \\    __shelly_target=$1
     \\    if [ "$__shelly_have_owner" -eq 1 ]; then

@@ -722,6 +722,8 @@ pub fn build(b: *std.Build) void {
             "PackageBuilder cannot perform privileged package filesystem operations",
             "PackageBuilder simulates root ownership without host chown",
             "PackageBuilder preserves non-root virtual ownership and special modes",
+            "PackageBuilder install option clusters preserve virtual ownership",
+            "PackageBuilder install rejects unsupported and malformed ownership options",
             "PackageBuilder virtual ownership follows identities and recursive snapshots",
             "virtual ownership identities distinguish reused inode numbers",
             "PackageBuilder isolates virtual ownership between split members",

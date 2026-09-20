@@ -1601,6 +1601,150 @@ test "PackageBuilder preserves non-root virtual ownership and special modes" {
     try testing.expect(saw_installed_metadata);
 }
 
+test "PackageBuilder install option clusters preserve virtual ownership" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\arch=('any')
+        \\options=('!strip')
+        \\package() {
+        \\  install -dm700 -g 209 "$pkgdir/etc/cups/ssl"
+        \\  install -dm 700 -g209 "$pkgdir/etc/cups/spaced"
+        \\  install -d -m700 --group=209 "$pkgdir/etc/cups/separated"
+        \\  install -dg209 -m700 "$pkgdir/etc/cups/clustered" "$pkgdir/etc/cups/multiple"
+        \\  install -do42 -g209 -m700 "$pkgdir/etc/cups/owner"
+        \\  install -Dm644 -o42 -g209 /dev/null "$pkgdir/usr/share/demo/attached"
+        \\  install -Dpo 42 -g209 -m644 /dev/null "$pkgdir/usr/share/demo/next"
+        \\  install -Dpt"$pkgdir/usr/share/demo/target" -m644 -o42 -g209 /dev/null
+        \\  install -DTm644 -o42 -g209 /dev/null "$pkgdir/usr/share/demo/no-target"
+        \\  install -m644 -o42 -g209 /dev/null "$pkgdir/usr/share/demo/backup"
+        \\  install -bSog -m644 -o42 -g209 /dev/null "$pkgdir/usr/share/demo/backup"
+        \\  cd "$pkgdir"
+        \\  install -dm700 -g209 -- -ssl
+        \\  # Without ownership requests, preserve options delegated to coreutils.
+        \\  install --debug -dm700 -- -g209
+        \\}
+    , null, null);
+    defer fixture.destroy();
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const Expected = struct { path: []const u8, uid: i64 = 0, gid: i64 = 209, mode: u32 = 0o700 };
+    const expected = [_]Expected{
+        .{ .path = "etc/cups/ssl" },
+        .{ .path = "etc/cups/spaced" },
+        .{ .path = "etc/cups/separated" },
+        .{ .path = "etc/cups/clustered" },
+        .{ .path = "etc/cups/multiple" },
+        .{ .path = "etc/cups/owner", .uid = 42 },
+        .{ .path = "usr/share/demo/attached", .uid = 42, .mode = 0o644 },
+        .{ .path = "usr/share/demo/next", .uid = 42, .mode = 0o644 },
+        .{ .path = "usr/share/demo/target/null", .uid = 42, .mode = 0o644 },
+        .{ .path = "usr/share/demo/no-target", .uid = 42, .mode = 0o644 },
+        .{ .path = "usr/share/demo/backup", .uid = 42, .mode = 0o644 },
+        .{ .path = "usr/share/demo/backupog", .uid = 42, .mode = 0o644 },
+        .{ .path = "-ssl" },
+        .{ .path = "-g209", .gid = 0 },
+    };
+
+    var reader = try archive.Reader.init(allocator, artifacts[0].path);
+    defer reader.deinit();
+    var seen = [_]bool{false} ** expected.len;
+    while (try reader.next()) |entry| {
+        for (expected, 0..) |item, index| {
+            if (!std.mem.eql(u8, std.mem.trimEnd(u8, entry.path, "/"), item.path)) continue;
+            seen[index] = true;
+            try testing.expectEqual(item.uid, entry.uid);
+            try testing.expectEqual(item.gid, entry.gid);
+            try testing.expectEqual(item.mode, entry.permissions);
+        }
+    }
+    for (seen) |found| try testing.expect(found);
+
+    const mtree_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "pkg/demo/.MTREE" });
+    defer allocator.free(mtree_path);
+    var gzip = try process_runner.run(allocator, io, &.{ "gzip", "-dc", mtree_path }, null, null);
+    defer gzip.deinit(allocator);
+    try testing.expectEqual(@as(u8, 0), gzip.exit_code);
+    for (expected) |item| {
+        const prefix = try std.fmt.allocPrint(allocator, "./{s} ", .{item.path});
+        defer allocator.free(prefix);
+        const metadata = try std.fmt.allocPrint(allocator, "uid={d} gid={d} mode={o}", .{ item.uid, item.gid, item.mode });
+        defer allocator.free(metadata);
+        var lines = std.mem.splitScalar(u8, gzip.stdout, '\n');
+        var found = false;
+        while (lines.next()) |line| {
+            if (!std.mem.startsWith(u8, line, prefix)) continue;
+            found = true;
+            var fields = std.mem.tokenizeScalar(u8, metadata, ' ');
+            while (fields.next()) |field| {
+                var actual_fields = std.mem.tokenizeScalar(u8, line, ' ');
+                var matched = false;
+                while (actual_fields.next()) |actual| {
+                    if (std.mem.eql(u8, field, actual)) matched = true;
+                }
+                try testing.expect(matched);
+            }
+        }
+        try testing.expect(found);
+
+        const staged_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "pkg/demo", item.path });
+        defer allocator.free(staged_path);
+        var stat_result = try process_runner.run(allocator, io, &.{ "stat", "-c", "%u:%g", staged_path }, null, null);
+        defer stat_result.deinit(allocator);
+        try testing.expectEqual(@as(u8, 0), stat_result.exit_code);
+        const host_owner = try std.fmt.allocPrint(allocator, "{d}:{d}", .{ std.os.linux.geteuid(), std.os.linux.getegid() });
+        defer allocator.free(host_owner);
+        try testing.expectEqualStrings(host_owner, std.mem.trim(u8, stat_result.stdout, " \t\r\n"));
+    }
+}
+
+test "PackageBuilder install rejects unsupported and malformed ownership options" {
+    const allocator = testing.allocator;
+    const cases = [_]struct { command: []const u8, diagnostic: []const u8 }{
+        .{ .command = "install -dm700 -g", .diagnostic = "install requires an argument for: -g" },
+        .{ .command = "install -dm", .diagnostic = "install requires an argument for: -m" },
+        .{ .command = "install -do '' \"$pkgdir/rejected\"", .diagnostic = "install requires a nonempty argument for: -o" },
+        .{ .command = "install --group= -dm700 \"$pkgdir/rejected\"", .diagnostic = "install requires a nonempty argument for: --group=" },
+        .{ .command = "install -dQg209 \"$pkgdir/rejected\"", .diagnostic = "install cannot record ownership with unsupported option: -Q" },
+        .{ .command = "install --debug -dg209 \"$pkgdir/rejected\"", .diagnostic = "install cannot record ownership with unsupported option: --debug" },
+    };
+    for (cases) |case| {
+        const Capture = struct {
+            expected: []const u8,
+            seen: std.atomic.Value(bool) = .init(false),
+
+            fn handle(data: ?*anyopaque, event: op_context.Event) void {
+                const self: *@This() = @ptrCast(@alignCast(data.?));
+                switch (event) {
+                    .status => |status| {
+                        if (std.mem.indexOf(u8, status.message, self.expected) != null)
+                            self.seen.store(true, .release);
+                    },
+                    else => {},
+                }
+            }
+        };
+        var capture: Capture = .{ .expected = case.diagnostic };
+        const content = try std.fmt.allocPrint(allocator,
+            \\pkgname=demo
+            \\pkgver=1
+            \\arch=('any')
+            \\package() {{
+            \\  {s}
+            \\}}
+        , .{case.command});
+        defer allocator.free(content);
+        var fixture = try Fixture.create(allocator, content, .{ .function = Capture.handle, .data = &capture }, null);
+        defer fixture.destroy();
+        try testing.expectError(error.PrivilegedPackageOperationUnsupported, fixture.builder.BuildPackage());
+        try testing.expect(capture.seen.load(.acquire));
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(testing.io, "pkg/demo/rejected", .{}));
+    }
+}
+
 test "PackageBuilder virtual ownership follows identities and recursive snapshots" {
     const allocator = testing.allocator;
     var fixture = try Fixture.create(allocator,

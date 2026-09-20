@@ -74,6 +74,9 @@ build() {
   return 1
 }
 package() {
+  # CUPS uses clustered flags while assigning virtual group ownership.
+  install -dm700 -g 209 "$pkgdir/etc/cups/ssl"
+  test "$(stat -c '%u:%g:%a' "$pkgdir/etc/cups/ssl")" = 1000:1000:700
   install -Dm644 /dev/null "$pkgdir/usr/share/shelly-isolated-smoke/marker"
   chown root:root "$pkgdir/usr/share/shelly-isolated-smoke/marker"
   mkdir -p "$pkgdir/usr/info" "$pkgdir/usr/share/info"
@@ -185,6 +188,10 @@ for mask in 0022 0007 0027 0077; do
   test "$(stat -c %g "$artifact")" = "$(id -g)"
   tar -tf "$artifact" >"$case_dir/archive-entries"
   grep -Fxq 'usr/share/shelly-isolated-smoke/marker' "$case_dir/archive-entries"
+  tar --numeric-owner -tvf "$artifact" etc/cups/ssl/ >"$case_dir/ssl-metadata"
+  awk '$1 == "drwx------" && $2 == "0/209" {found=1} END {exit !found}' "$case_dir/ssl-metadata"
+  tar -xOf "$artifact" .MTREE | gzip -dc >"$case_dir/mtree"
+  awk '$1 == "./etc/cups/ssl" && /uid=0 / && /gid=209 / && /mode=700( |$)/ {found=1} END {exit !found}' "$case_dir/mtree"
   if grep -Exq '(\./)?(usr/info/dir|usr/share/info/dir|\.packlist|smoke\.pod)' "$case_dir/archive-entries"; then
     printf 'isolated package retained a purge target\n' >&2
     exit 1
