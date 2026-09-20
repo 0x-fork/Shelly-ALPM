@@ -4,7 +4,7 @@
 fresh, operation-scoped Arch root through `systemd-nspawn`.
 
 The stable JSON schemas, capability probe, and exit behavior for unattended
-callers are defined by the [Remora automation contract](remora-automation.md).
+callers are available via `shelly --version --json` before scheduling a build.
 
 The elevated process is a coordinator only. It reviews the host PKGBUILD and
 local inputs, materializes only those byte-exact reviewed inputs in the guest,
@@ -96,6 +96,11 @@ Current limitations are deliberately fail-closed:
   written through an opened directory handle, assigned to the invoking UID/GID
   before publication, and atomically renamed; the root coordinator will not
   create an arbitrary host destination from elevated configuration.
+
+`--install` installs the exported archives after export, in the root
+coordinator, through the ordinary host install flow: same transaction rules and
+confirmation behavior as `shelly install standard <package>`. The guest never
+installs into the host and the flag is stripped from the guest arguments.
 
 The nspawn backend invokes Shelly's native builder. It does not invoke or
 construct a command for `makepkg`, `makechrootpkg`, or `arch-nspawn`.
