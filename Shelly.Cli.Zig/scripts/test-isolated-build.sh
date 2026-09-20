@@ -38,6 +38,7 @@ pkgver=1
 pkgrel=1
 arch=('any')
 license=('MIT')
+depends=('bash')
 options=('!strip')
 source=('reviewed.txt')
 build() {
@@ -74,6 +75,8 @@ build() {
   return 1
 }
 package() {
+  # Output-only requirements must not be installed while provisioning.
+  depends=('shelly-isolated-runtime-only')
   # CUPS uses clustered flags while assigning virtual group ownership.
   install -dm700 -g 209 "$pkgdir/etc/cups/ssl"
   test "$(stat -c '%u:%g:%a' "$pkgdir/etc/cups/ssl")" = 1000:1000:700
@@ -187,6 +190,7 @@ for mask in 0022 0007 0027 0077; do
   chmod 0755 "$case_dir/elevator"
   SHELLY_ELEVATOR="$case_dir/elevator" "$shelly_bin" build \
     --isolated \
+    --sync-deps \
     --review-digest "$review_digest" \
     --no-confirm \
     --no-check \
@@ -198,6 +202,8 @@ for mask in 0022 0007 0027 0077; do
   test -f "$artifact"
   test "$(stat -c %u "$artifact")" = "$(id -u)"
   test "$(stat -c %g "$artifact")" = "$(id -g)"
+  tar -xOf "$artifact" .PKGINFO >"$case_dir/pkginfo"
+  grep -Fxq 'depend = shelly-isolated-runtime-only' "$case_dir/pkginfo"
   tar -tf "$artifact" >"$case_dir/archive-entries"
   grep -Fxq 'usr/share/shelly-isolated-smoke/marker' "$case_dir/archive-entries"
   tar --numeric-owner -tvf "$artifact" etc/cups/ssl/ >"$case_dir/ssl-metadata"

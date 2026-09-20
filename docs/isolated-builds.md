@@ -72,6 +72,16 @@ repositories again using the configured signature policy. Local repository
 servers must be readable by the invoking user during review. A built archive
 must be published in a configured repository's database to be resolved here.
 
+Build dependency planning uses the PKGBUILD's global `depends`, `makedepends`,
+and (unless checks are disabled) `checkdepends`, including the active
+architecture's arrays. Dependencies assigned inside `package()` or
+`package_<name>()` describe the resulting package and do not add provisioning
+targets. This follows makepkg's dependency rules and lets conflicting split
+outputs such as PipeWire's JACK implementations be built together. Their
+runtime dependencies and `provides` remain in the package metadata. An output
+that is also explicitly required as a global build input must still be
+installed before the build; its future artifact does not satisfy that input.
+
 Current limitations are deliberately fail-closed:
 
 - `--sign` is rejected because private signing keys are never copied or mounted
