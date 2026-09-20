@@ -43,7 +43,6 @@ pub const ShellyConfig = struct {
     RecommendedEnabled: bool = true,
     ShellyIconsEnabled: bool = true,
     ShellySearchEnabled: bool = false,
-    WebviewEnabled: bool = false,
 
     // Window & View
     DefaultPageDropDown: ShellyTabs = .packages,
