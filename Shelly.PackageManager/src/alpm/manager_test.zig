@@ -1472,7 +1472,7 @@ test "refresh reports a detailed reinitialization failure" {
     try testing.expect(std.mem.indexOf(
         u8,
         capture.text(),
-        "Failed to reinitialize ALPM while reloading package databases",
+        "Could not reopen the package database while refreshing package state",
     ) != null);
     try testing.expect(std.mem.indexOf(u8, capture.text(), "ALPM operation failed") == null);
 }
@@ -2670,7 +2670,7 @@ test "remove_packages cancels removal of a held package without confirmation" {
         error.PrepareFailed,
         mgr.remove_packages(&package_names, .{}, true),
     );
-    try testing.expectEqualStrings("Held package removal cancelled.", capture.text());
+    try testing.expectEqualStrings("Removal cancelled because permission to remove held packages was declined.", capture.text());
 }
 
 test "remove_packages previews resolved recursive and optional dependencies before cancellation" {

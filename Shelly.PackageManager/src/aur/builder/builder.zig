@@ -219,7 +219,7 @@ pub const PackageBuilder = struct {
         var bad_path: ?[]const u8 = null;
         const path = build_path.resolve(self.allocator, self.io, self.shellybuild_config.build.extra_path, &bad_path) catch |err| {
             if (bad_path) |invalid| {
-                const message = try std.fmt.allocPrint(self.allocator, "Cannot use build.extra_path directory '{s}': {t}. Configure an absolute directory searchable by the build user.", .{ invalid, err });
+                const message = try std.fmt.allocPrint(self.allocator, "Cannot use build.extra_path directory '{0f}': {1s} Configure an absolute directory searchable by the build user.\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(invalid), @import("diagnostics").cause(err), @errorName(err) });
                 defer self.allocator.free(message);
                 operation.reportError(err, message, "build configuration", null, false);
             }

@@ -738,8 +738,8 @@ pub const Database = struct {
 
         signer.signDetached(tmp_path, staged_signature, key) catch |err| {
             std.log.warn(
-                "could not sign repository database '{s}': {s}",
-                .{ filename, @errorName(err) },
+                "Could not sign repository database {0f}. {1s} Review the signing key and signer output.\n\nTechnical details: {2s}",
+                .{ @import("diagnostics").safe(filename), @import("diagnostics").cause(err), @errorName(err) },
             );
             // A signer that died mid-write can leave a partial file behind.
             deleteFileIgnoringMissing(self.io, staged_signature) catch {};

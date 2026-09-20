@@ -41,7 +41,7 @@ pub fn dispatch(
     const operation = operationForPath(invocation.command.path) orelse return null;
 
     if (invocation.positionals.len == 0)
-        return try reportUsage(context, "No package database specified.");
+        return try reportUsage(context, "Specify the repository database path. See the command help for usage.");
     for (invocation.positionals) |positional| {
         if (isBlank(positional))
             return try reportUsage(context, "Package database arguments cannot be empty.");
@@ -95,7 +95,7 @@ fn executeAdd(
     for (summary.failures) |failure| try printFailure(context, failure);
 
     if (summary.failures.len > 0) {
-        try context.stderr.print("Package database was not modified due to errors.\n", .{});
+        try context.stderr.print("The repository database was not modified because the package checks failed. Resolve the reported package errors before trying again.\n", .{});
         return 1;
     }
     if (!summary.published) {
@@ -128,10 +128,10 @@ fn executeRemove(
         try context.stdout.print("removing '{s}' from repository '{s}'.\n", .{ entry_dir, db.db_filename });
     }
     for (summary.not_found) |name| {
-        try context.stderr.print("Package matching '{s}' not found.\n", .{name});
+        try context.stderr.print("Could not remove '{0f}' because it is not present in repository database '{1f}'. Check the package name and database path.\n", .{ @import("diagnostics").safe(name), @import("diagnostics").safe(db.db_filename) });
     }
     if (summary.not_found.len > 0) {
-        try context.stderr.print("Package database was not modified due to errors.\n", .{});
+        try context.stderr.print("The repository database was not modified because the package checks failed. Resolve the reported package errors before trying again.\n", .{});
         return 1;
     }
     if (summary.published_empty)
@@ -175,11 +175,11 @@ fn executeVerify(
         if (!result.archive_present) continue;
         try context.stdout.print("Verifying database signature...\n", .{});
         if (!result.signature_present) {
-            try context.stdout.print("No existing signature found, skipping verification.\n", .{});
+            try context.stdout.print("The repository database has no signature. Verification was skipped; its authenticity has not been verified.\n", .{});
             continue;
         }
         if (!result.verified) {
-            try context.stderr.print("Database signature was NOT valid!\n", .{});
+            try context.stderr.print("Could not verify the repository database signature for the selected path. Obtain a valid database and signature from the repository.\n", .{});
             return 1;
         }
         try context.stdout.print("Database signature file verified.\n", .{});
@@ -212,11 +212,11 @@ fn signerFor(
 fn printFailure(context: *runtime.RuntimeContext, failure: Failure) !void {
     const path = failure.package_path;
     switch (failure.kind) {
-        .missing_file => try context.stderr.print("error: cannot find '{s}' package\n", .{path}),
-        .not_a_package => try context.stderr.print("error: '{s}' is not a package\n", .{path}),
-        .invalid_package => try context.stderr.print("error: '{s}' has no PKGINFO\n", .{path}),
-        .armored_signature => try context.stderr.print("error: signature for '{s}' is ASCII-armored\n", .{path}),
-        .oversized_signature => try context.stderr.print("error: signature for '{s}' exceeds 16384 bytes\n", .{path}),
+        .missing_file => try context.stderr.print("Could not find package archive '{0f}'. Check the path and try again.\n", .{@import("diagnostics").safe(path)}),
+        .not_a_package => try context.stderr.print("Could not add '{0f}' to the repository because it is not a supported package archive. Select a built package archive.\n", .{@import("diagnostics").safe(path)}),
+        .invalid_package => try context.stderr.print("Could not add '{0f}' to the repository because the archive has no .PKGINFO metadata. Rebuild or obtain a complete package archive.\n", .{@import("diagnostics").safe(path)}),
+        .armored_signature => try context.stderr.print("Could not add the signature for '{0f}' because it is ASCII-armored. Supply a binary detached signature.\n", .{@import("diagnostics").safe(path)}),
+        .oversized_signature => try context.stderr.print("Could not add the signature for '{0f}' because it exceeds the 16,384-byte limit. Supply a supported detached signature.\n", .{@import("diagnostics").safe(path)}),
     }
 }
 
@@ -224,11 +224,11 @@ fn printWarning(context: *runtime.RuntimeContext, warning: Warning) !void {
     switch (warning) {
         .none => {},
         .expired_signature => try context.stderr.print(
-            "warning: the signature is valid, but it has expired.\n",
+            "The signature for the selected path verifies cryptographically, but has expired. Obtain a current signature from the repository.\n",
             .{},
         ),
         .expired_key => try context.stderr.print(
-            "warning: the signature is valid, but the signing key has expired.\n",
+            "The signature for the selected path verifies cryptographically, but its signing key has expired. Obtain an updated signing key and signature from the repository.\n",
             .{},
         ),
     }
@@ -263,28 +263,28 @@ fn reportError(
 ) !u8 {
     switch (err) {
         error.LockHeld => {
-            try context.stderr.print("Failed to acquire lockfile: '{s}'.\n", .{targets.lock_path});
+            try context.stderr.print("Could not lock repository database '{0f}' using '{1f}'. If another repository update is running, wait for it to finish.\n", .{ @import("diagnostics").safe(targets.db_path), @import("diagnostics").safe(targets.lock_path) });
             return 2;
         },
         error.DatabaseNotFound => try context.stderr.print(
-            "Repository file '{s}' was not found.\n",
-            .{targets.db_path},
+            "Could not find repository database '{0f}'. Check the path and try again.\n",
+            .{@import("diagnostics").safe(targets.db_path)},
         ),
         error.UnsupportedExtension => try context.stderr.print(
-            "Repository file '{s}' does not end in db.tar.<compression>.\n",
-            .{targets.db_path},
+            "Unsupported repository database filename '{0f}'. Use a filename ending in.db.tar.<compression> with a supported compression format.\n",
+            .{@import("diagnostics").safe(targets.db_path)},
         ),
         error.DirectoryMissing => try context.stderr.print(
-            "Directory '{s}' does not exist.\n",
-            .{targets.db_dir},
+            "Directory '{0f}' does not exist. Create it or select an existing directory.\n",
+            .{@import("diagnostics").safe(targets.db_dir)},
         ),
         error.InvalidDatabase => try context.stderr.print(
-            "Database file '{s}' is corrupted.\n",
-            .{targets.db_path},
+            "Could not read repository database '{0f}' because it is corrupted. Restore it from a known-good copy or rebuild it from the package archives.\n",
+            .{@import("diagnostics").safe(targets.db_path)},
         ),
         else => try context.stderr.print(
-            "Unable to {s} the package database: {t}\n",
-            .{ verb, err },
+            "Could not {0f} the package database: {1s}\n\nTechnical details: {2s}\n",
+            .{ @import("diagnostics").safe(verb), @import("diagnostics").cause(err), @errorName(err) },
         ),
     }
     return 1;
@@ -403,7 +403,7 @@ test "repo-db requires a database and at least one package" {
         &.{ "repo-db", "add", "demo.db.tar.zst" },
     );
     try std.testing.expect(without_packages == .failure);
-    try std.testing.expect(std.mem.indexOf(u8, without_packages.failure.message, "command: 'add'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, without_packages.failure.message, "Command 'shelly repo-db add'") != null);
 }
 
 test "repo-db remove requires a database and one or more names" {
@@ -421,7 +421,7 @@ test "repo-db remove requires a database and one or more names" {
         &.{ "repo-db", "remove", "demo.db.tar.zst" },
     );
     try std.testing.expect(without_names == .failure);
-    try std.testing.expect(std.mem.indexOf(u8, without_names.failure.message, "command: 'remove'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, without_names.failure.message, "Command 'shelly repo-db remove'") != null);
 }
 
 test "repo-db list prints entries in plain and JSON output" {
@@ -482,6 +482,6 @@ test "repo-db maps lock contention to exit code 2" {
     });
     try std.testing.expectEqual(@as(?u8, 2), try dispatch(&tc.context, &add));
     const printed = tc.stderr.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, printed, "Failed to acquire lockfile") != null);
+    try std.testing.expect(std.mem.indexOf(u8, printed, "Could not lock repository database") != null);
     try std.testing.expect(std.mem.indexOf(u8, printed, lock_path) != null);
 }

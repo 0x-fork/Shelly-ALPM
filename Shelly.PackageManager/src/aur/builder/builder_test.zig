@@ -5519,7 +5519,7 @@ test "PackageBuilder records a sandbox hint when a confined step fails" {
 
     const build_log = try readOnlyBuildLog(allocator, io, fixture.build_dir);
     defer allocator.free(build_log);
-    try testing.expect(std.mem.indexOf(u8, build_log, "[sandbox] step failed inside the Landlock sandbox") != null);
+    try testing.expect(std.mem.indexOf(u8, build_log, "The build step failed inside the Landlock sandbox") != null);
 }
 
 test "PackageBuilder standalone files use aliases and are available before prepare" {
