@@ -1909,6 +1909,84 @@ test "PackageBuilder install rejects unsupported and malformed ownership options
     }
 }
 
+test "PackageBuilder supports Arch xorg-server source package ownership" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgbase=xorg-server
+        \\pkgname=('xorg-server-src')
+        \\pkgver=1
+        \\arch=('any')
+        \\build() {
+        \\  mkdir -p xorg-server/man
+        \\  echo 'manual source' > xorg-server/man/Xserver.man
+        \\  echo 'license' > xorg-server/COPYING
+        \\  tar czf ${pkgbase}-${pkgver}.tar.gz ${pkgbase}
+        \\}
+        \\package_xorg-server-src() {
+        \\  install -d "${pkgdir}"/usr/src/
+        \\  cd "${pkgdir}"/usr/src/
+        \\  tar xvf "${srcdir}/${pkgbase}-${pkgver}.tar.gz"
+        \\  chown root:root --recursive ${pkgbase}
+        \\  install -m644 -Dt "${pkgdir}/usr/share/licenses/${pkgname}" "${pkgbase}"/COPYING
+        \\}
+    , null, "xorg-server-src");
+    defer fixture.destroy();
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    var reader = try archive.Reader.init(allocator, artifacts[0].path);
+    defer reader.deinit();
+    var saw_manual = false;
+    var saw_license = false;
+    while (try reader.next()) |entry| {
+        try testing.expectEqual(@as(i64, 0), entry.uid);
+        try testing.expectEqual(@as(i64, 0), entry.gid);
+        if (std.mem.eql(u8, entry.path, "usr/src/xorg-server/man/Xserver.man")) saw_manual = true;
+        if (std.mem.eql(u8, entry.path, "usr/share/licenses/xorg-server-src/COPYING")) saw_license = true;
+    }
+    try testing.expect(saw_manual);
+    try testing.expect(saw_license);
+}
+
+test "PackageBuilder ownership options can follow operands and respect double dash" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=ownership-options
+        \\pkgver=1
+        \\arch=('any')
+        \\package() {
+        \\  mkdir -p "$pkgdir/tree/nested"
+        \\  cd "$pkgdir"
+        \\  touch tree/nested/data ./--recursive ./-h
+        \\  chown 41:81 --recursive tree
+        \\  chgrp 82 tree -R
+        \\  /bin/sh -ec 'chown 43:83 tree -R; chgrp 84 --recursive tree'
+        \\  chown 45:85 -- --recursive -h
+        \\  chgrp 86 -- --recursive -h
+        \\}
+    , null, null);
+    defer fixture.destroy();
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    var reader = try archive.Reader.init(allocator, artifacts[0].path);
+    defer reader.deinit();
+    var checked: usize = 0;
+    while (try reader.next()) |entry| {
+        const path = std.mem.trimEnd(u8, entry.path, "/");
+        if (std.mem.eql(u8, path, "tree") or std.mem.startsWith(u8, path, "tree/")) {
+            checked += 1;
+            try testing.expectEqual(@as(i64, 43), entry.uid);
+            try testing.expectEqual(@as(i64, 84), entry.gid);
+        } else if (std.mem.eql(u8, path, "--recursive") or std.mem.eql(u8, path, "-h")) {
+            checked += 1;
+            try testing.expectEqual(@as(i64, 45), entry.uid);
+            try testing.expectEqual(@as(i64, 86), entry.gid);
+        }
+    }
+    try testing.expectEqual(@as(usize, 5), checked);
+}
+
 test "PackageBuilder virtual ownership follows identities and recursive snapshots" {
     const allocator = testing.allocator;
     var fixture = try Fixture.create(allocator,
