@@ -786,7 +786,7 @@ fn extractSourceArchiveIfRecognized(
             next_entry = try reader.next();
             continue;
         }
-        const relative = try archive.normalizeEntryPath(self.allocator, entry.path);
+        const relative = try archive.normalizePosixEntryPath(self.allocator, entry.path);
         defer self.allocator.free(relative);
         const destination = try std.fs.path.join(self.allocator, &.{ destination_root, relative });
         defer self.allocator.free(destination);

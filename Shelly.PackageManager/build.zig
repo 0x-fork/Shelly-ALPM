@@ -763,6 +763,8 @@ pub fn build(b: *std.Build) void {
             "PackageBuilder extracts source archives into srcdir",
             "PackageBuilder standalone",
             "PackageBuilder detects source archives by content including zip and tar zstd",
+            "PackageBuilder preserves literal backslashes in GStreamer source archive filenames",
+            "PackageBuilder rejects source archive traversal even alongside literal backslashes",
             "PackageBuilder extracts an extensionless source over its matching archive root",
             "PackageBuilder rejects an archive root colliding with another staged source",
             "PackageBuilder preserves source archive modification timestamps",

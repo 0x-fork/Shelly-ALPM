@@ -3798,6 +3798,68 @@ test "PackageBuilder detects source archives by content including zip and tar zs
     try fixture.temporary.dir.access(io, "pkg/demo/usr/share/demo/from-zstd.txt", .{});
 }
 
+test "PackageBuilder preserves literal backslashes in GStreamer source archive filenames" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('docs.tar.xz')
+        \\sha256sums=('SKIP')
+        \\package() {
+        \\  mkdir -p "$pkgdir/usr/share/doc/demo"
+        \\  cp -a "$srcdir/html" "$pkgdir/usr/share/doc/demo/"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    const archive_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "docs.tar.xz" });
+    defer allocator.free(archive_path);
+    const filename = "html/assets/js/search/hotdoc_fragments/ges-enums.html-GES_TEXT_HALIGN_TYPE\\.fragment";
+    try archive.writeFixture(allocator, archive_path, .xz, &.{
+        .{ .path = filename, .contents = "search fragment\n" },
+        .{ .path = "html/literal\\directory/page.html", .contents = "page\n" },
+    });
+    fixture.builder.options.sources_prepared = false;
+    try fixture.temporary.dir.deleteTree(io, "src");
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const contents = try fixture.temporary.dir.readFileAlloc(io, "src/" ++ filename, allocator, .limited(1024));
+    defer allocator.free(contents);
+    try testing.expectEqualStrings("search fragment\n", contents);
+    try fixture.temporary.dir.access(io, "pkg/demo/usr/share/doc/demo/" ++ filename, .{});
+    try fixture.temporary.dir.access(io, "src/html/literal\\directory/page.html", .{});
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "src/html/literal/directory/page.html", .{}));
+}
+
+test "PackageBuilder rejects source archive traversal even alongside literal backslashes" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_][:0]const u8{ "../escape-marker", "docs\\/../../escape-marker", "/escape-marker" }) |path| {
+        var fixture = try Fixture.create(allocator,
+            \\pkgname=demo
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('payload.tar.gz')
+            \\sha256sums=('SKIP')
+            \\package() { :; }
+        , null, null);
+        defer fixture.destroy();
+        const archive_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "payload.tar.gz" });
+        defer allocator.free(archive_path);
+        try archive.writeFixture(allocator, archive_path, .gzip, &.{
+            .{ .path = path, .contents = "must not be extracted\n" },
+        });
+        fixture.builder.options.sources_prepared = false;
+        try fixture.temporary.dir.deleteTree(io, "src");
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "escape-marker", .{}));
+    }
+}
+
 test "PackageBuilder extracts an extensionless source over its matching archive root" {
     const allocator = testing.allocator;
     const io = testing.io;
