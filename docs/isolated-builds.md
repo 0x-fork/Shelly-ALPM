@@ -15,6 +15,16 @@ database, cache, and log under that root. PKGBUILD lifecycle functions run as
 the fixed unprivileged `shelly-build` guest account. Private UID mapping is
 required, and the command fails closed when systemd cannot provide it.
 
+Provisioning reads hooks only from the guest's `/usr/share/libalpm/hooks` and
+`/etc/pacman.d/hooks`, replacing host defaults and configured `HookDir` entries.
+libalpm discovers newly installed hooks after the initial transaction and runs
+their matching post-transaction actions inside the root. This initializes tools
+such as TeX Live, including its filename databases, formats, and font maps.
+Package setup errors stop provisioning even when libalpm considers the package
+transaction committed. Hook names and output are streamed into the operation
+log before root cleanup. The baseline finalizers remain as idempotent checks
+for required linker, account, directory, and certificate setup.
+
 The container does not bind the host checkout, home directory, package
 database, configuration directories, or runtime sockets. Its merged
 `shellybuild.conf` uses root-local work, source, log, and artifact paths. The
@@ -166,6 +176,30 @@ UID/GID 1000, root-owned traversal-directory and executable permissions,
 configuration readability and destinations, and build-directory ownership.
 A host supervisor checks the operation's `0700` boundary before allowing the
 guest to finish, then verifies operation-root cleanup.
+
+Bootstrap configuration and diagnostic tests run without elevation:
+
+```sh
+(cd Shelly.PackageManager && zig build bootstrap-test bootstrap-hook-test)
+```
+
+The hook test uses an unprivileged user/mount/PID namespace and a temporary
+package root. It installs hooks in the same transaction as their executable,
+checks their execution order, excludes host hooks, and detects post-transaction
+failures even when libalpm reports a successful commit. User namespaces must be
+enabled on the test system.
+
+To test the documentation toolchain in a real nspawn build, run from a normal
+user session with sudo authentication available:
+
+```sh
+Shelly.Cli.Zig/scripts/test-isolated-docs.sh
+```
+
+This installs `asciidoc` and `dblatex` only in the disposable root, checks TeX's
+generated format and font map, and packages a PDF built by the unprivileged
+guest. Set `SHELLY_BIN` to test an existing CLI. On failure, the fixture and
+verbose build output remain in the printed temporary directory for diagnosis.
 
 Each case also reviews a group-writable (`0660`) local source, passes the
 returned digest through `--review-digest`, checks the staged input in the guest,

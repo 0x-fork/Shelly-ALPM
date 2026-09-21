@@ -239,6 +239,37 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    const bootstrap_tests = b.addTest(.{
+        .root_module = mod,
+        .filters = &.{ "bootstrap", "provisioning", "root finalizer" },
+    });
+    const bootstrap_step = b.step("bootstrap-test", "Test isolated root configuration and diagnostics");
+    bootstrap_step.dependOn(&b.addRunArtifact(bootstrap_tests).step);
+
+    const hook_helper = b.addExecutable(.{
+        .name = "bootstrap-hook-helper",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/alpm/bootstrap_hook_helper.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const hook_fixture = b.addOptions();
+    hook_fixture.addOptionPath("helper", hook_helper.getEmittedBin());
+    const hook_test_module = b.createModule(.{
+        .root_source_file = b.path("src/alpm/bootstrap_hook_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hook_test_module.addImport("Zigalpm", mod);
+    hook_test_module.addOptions("hook_fixture", hook_fixture);
+    const hook_tests = b.addTest(.{ .root_module = hook_test_module });
+    const run_hook_tests = b.addSystemCommand(&.{ "unshare", "--user", "--map-root-user", "--mount", "--pid", "--fork" });
+    run_hook_tests.addArtifactArg(hook_tests);
+    run_hook_tests.has_side_effects = true;
+    const hook_step = b.step("bootstrap-hook-test", "Test real guest hooks in a disposable user namespace (no host root)");
+    hook_step.dependOn(&run_hook_tests.step);
+
     const account_tests = b.addTest(.{
         .name = "user-account-test",
         .root_module = mod,

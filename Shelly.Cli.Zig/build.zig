@@ -122,6 +122,7 @@ pub fn build(b: *std.Build) void {
         .root_module = isolated_test_module,
         .filters = &.{
             "reviewed input paths cannot escape the staged source root",
+            "isolated command failures preserve the stage and native exit code",
             "reviewed inputs are materialized with exact bytes and permissions",
             "staged reviewed inputs preserve the host digest and reject real changes",
             "isolated public source key bundle is readable under restrictive umasks",

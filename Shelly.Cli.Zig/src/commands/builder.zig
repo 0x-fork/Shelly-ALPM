@@ -2342,7 +2342,11 @@ fn contextLogPath(context: *runtime.RuntimeContext) ?[]const u8 {
 
 fn preparationErrorMessage(context: *runtime.RuntimeContext, err: anyerror) ![]u8 {
     const fallback = if (contextDiagnostic(context) == null)
-        try Zigalpm.user_errors.format(context.allocator, err, .{ .operation = "the PKGBUILD preparation" })
+        try Zigalpm.user_errors.format(context.allocator, err, .{ .operation = switch (err) {
+            error.IsolatedBuildFailed => "the isolated package build",
+            error.IsolatedBootstrapFailed, error.IsolatedCommandFailed => "the isolated build root setup",
+            else => "the PKGBUILD preparation",
+        } })
     else
         null;
     defer if (fallback) |message| context.allocator.free(message);
