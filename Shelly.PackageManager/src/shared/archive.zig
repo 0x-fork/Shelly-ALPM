@@ -666,7 +666,16 @@ fn requireWriteStatus(status: c_int) !void {
 /// Normalizes an archive entry into a path relative to an extraction root.
 /// Absolute paths, backslashes, and parent traversal are rejected.
 pub fn normalizeEntryPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    if (path.len == 0 or std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, '\\') != null)
+    if (std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, '\\') != null)
+        return Error.InvalidEntryPath;
+    return normalizePosixEntryPath(allocator, path);
+}
+
+/// Normalizes entries extracted with POSIX filesystem operations. Backslashes
+/// are literal filename bytes, as in GStreamer's generated documentation.
+/// Never use this for consumers that interpret backslashes as separators.
+pub fn normalizePosixEntryPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (path.len == 0 or std.fs.path.isAbsolutePosix(path))
         return Error.InvalidEntryPath;
 
     var normalized: std.ArrayList(u8) = .empty;
@@ -951,6 +960,18 @@ test "archive paths cannot escape the extraction root" {
     const normalized = try normalizeEntryPath(testing.allocator, "./usr//bin/demo");
     defer testing.allocator.free(normalized);
     try testing.expectEqualStrings("usr/bin/demo", normalized);
+}
+
+test "POSIX archive paths preserve backslashes without allowing parent traversal" {
+    const testing = std.testing;
+    const normalized = try normalizePosixEntryPath(testing.allocator, "./html//GES_TEXT_HALIGN_TYPE\\.fragment");
+    defer testing.allocator.free(normalized);
+    try testing.expectEqualStrings("html/GES_TEXT_HALIGN_TYPE\\.fragment", normalized);
+
+    for ([_][]const u8{ "", ".", "./", "/etc/passwd", "../etc/passwd", "docs\\/../../etc/passwd" }) |path|
+        try testing.expectError(Error.InvalidEntryPath, normalizePosixEntryPath(testing.allocator, path));
+    // Package/database consumers retain their stricter path policy.
+    try testing.expectError(Error.InvalidEntryPath, normalizeEntryPath(testing.allocator, "html/GES_TEXT_HALIGN_TYPE\\.fragment"));
 }
 
 const CompressionTestContext = struct {

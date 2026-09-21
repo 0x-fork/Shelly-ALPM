@@ -67,6 +67,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_module_tests.step);
     test_step.dependOn(&run_executable_tests.step);
 
+    const upgrade_tests = b.addTest(.{
+        .root_module = cli,
+        .filters = &.{"upgrade"},
+    });
+    const run_upgrade_tests = b.addRunArtifact(upgrade_tests);
+    const upgrade_test_step = b.step("upgrade-test", "Test upgrade coordination and result reporting");
+    upgrade_test_step.dependOn(&run_upgrade_tests.step);
+
     const account_tests = b.addTest(.{
         .name = "user-account-test",
         .root_module = cli,
@@ -89,6 +97,8 @@ pub fn build(b: *std.Build) void {
         .root_module = builder_test_module,
         .filters = &.{
             "makesrcinfo emits clean stdout and never runs lifecycle functions",
+            "review-only accepts Heroic array trimming",
+            "sync deps",
             "isolated source key",
             "isolated source public keys",
             "isolated child arguments",
@@ -113,6 +123,7 @@ pub fn build(b: *std.Build) void {
         .root_module = isolated_test_module,
         .filters = &.{
             "reviewed input paths cannot escape the staged source root",
+            "isolated command failures preserve the stage and native exit code",
             "reviewed inputs are materialized with exact bytes and permissions",
             "staged reviewed inputs preserve the host digest and reject real changes",
             "isolated public source key bundle is readable under restrictive umasks",
