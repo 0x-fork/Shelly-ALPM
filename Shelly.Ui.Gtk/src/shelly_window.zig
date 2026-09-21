@@ -19,6 +19,8 @@ const UtilitiesPage = @import("pages/utilities_page.zig").UtilitiesPage;
 const TransactionPage = @import("pages/transaction_page.zig").TransactionPage;
 const TransactionRequest = @import("pages/transaction_page.zig").TransactionRequest;
 const runtime = @import("services/runtime.zig");
+const ShellyCli = @import("services/shelly_cli.zig").ShellyCli;
+const AtollApiService = @import("services/atoll_api.zig").AtollApiService;
 const NavMode = @import("models/shelly_config.zig").NavMode;
 const ShellyTabs = @import("models/shelly_config.zig").ShellyTabs;
 const translations = @import("helpers/translations.zig");
@@ -43,6 +45,7 @@ pub const ShellyWindow = extern struct {
 
     const ICON_SLOT: c_int = 24;
     const LABEL_GAP: c_int = 8;
+    const default_aur_base = "https://aur.archlinux.org";
 
     const Private = struct {
         shell_box: *gtk.Box,
@@ -107,6 +110,7 @@ pub const ShellyWindow = extern struct {
 
         if (cfg.AtollAurEnabled != self.private().aur_slot_atoll) {
             swapAurSlot(self, cfg.AtollAurEnabled);
+            syncAurUrl(cfg.AtollAurEnabled);
         }
 
         setNavEnabled(self, "recommend", cfg.RecommendedEnabled);
@@ -572,6 +576,18 @@ pub const ShellyWindow = extern struct {
         const svc = runtime.config orelse return false;
         const cfg = svc.get() catch return false;
         return cfg.AtollAurEnabled;
+    }
+
+    fn syncAurUrl(use_atoll: bool) void {
+        const url = if (use_atoll) AtollApiService.base_url else default_aur_base;
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        defer arena.deinit();
+
+        const cli = ShellyCli{ .allocator = arena.allocator(), .io = runtime.io };
+        cli.set_aur_url(url) catch |err| {
+            std.log.warn("Could not set the AUR base URL to {0s}. {1s}\n\nTechnical details: {2s}", .{ url, @import("diagnostics").cause(err), @errorName(err) });
+        };
     }
 
     fn swapAurSlot(self: *ShellyWindow, use_atoll: bool) void {
