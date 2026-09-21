@@ -3080,6 +3080,38 @@ test "PackageBuilder accepts b2 checksums and honors noextract" {
     try fixture.temporary.dir.access(io, "pkg/cline-cli/usr/share/cline-cli/payload.tar.gz", .{});
 }
 
+test "PackageBuilder Heroic array trimming keeps archives for explicit package extraction" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=heroic-array-demo
+        \\pkgver=1
+        \\arch=('any')
+        \\source=('payload.tar.gz')
+        \\noextract=("${source[@]##*/}")
+        \\sha256sums=(SKIP)
+        \\package() {
+        \\  test "${#noextract[@]}" -eq 1
+        \\  test "${noextract[0]}" = payload.tar.gz
+        \\  test -f "$srcdir/payload.tar.gz"
+        \\  test ! -e "$srcdir/payload"
+        \\  mkdir -p "$pkgdir/usr/share/demo"
+        \\  tar -xzf "$srcdir/payload.tar.gz" -C "$pkgdir/usr/share/demo"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "payload", .data = "explicitly extracted\n" });
+    try runTestCommand(allocator, io, &.{ "tar", "-czf", "payload.tar.gz", "payload" }, fixture.build_dir);
+    try fixture.temporary.dir.deleteFile(io, "payload");
+    fixture.builder.options.sources_prepared = false;
+    try fixture.temporary.dir.deleteTree(io, "src");
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const payload = try readPackageEntry(allocator, artifacts[0].path, "usr/share/demo/payload");
+    defer allocator.free(payload);
+    try testing.expectEqualStrings("explicitly extracted\n", payload);
+}
+
 test "PackageBuilder stages and verifies local sources before build steps" {
     const allocator = testing.allocator;
     const io = testing.io;

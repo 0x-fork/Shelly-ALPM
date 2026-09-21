@@ -3664,6 +3664,39 @@ test "configured work directories exist before final review and remain command-u
     try std.Io.Dir.cwd().access(io, configured, .{});
 }
 
+test "review-only accepts Heroic array trimming without running package code" {
+    const spec = @import("../cli/spec.zig");
+    var test_context: test_support.TestContext = .{};
+    test_context.init();
+    defer test_context.deinit();
+    const allocator = test_context.arena.allocator();
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    const path = try std.fs.path.join(allocator, &.{ directory, "PKGBUILD" });
+    try temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data =
+        \\pkgname=heroic-array-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=("https://example.invalid/Heroic-${pkgver}-linux-x64.pacman")
+        \\noextract=("${source[@]##*/}")
+        \\sha256sums=('SKIP')
+        \\package() { touch "$startdir/lifecycle-ran"; }
+        \\
+    });
+    const environ = try testEnvironWithHome(std.testing.allocator, directory);
+    defer environ.block.deinit(std.testing.allocator);
+    test_context.context.environ = environ;
+    const manifest = try spec.Manifest.load(allocator);
+    const invocation = try parser.parse(allocator, &manifest, &.{ "build", path, "--review-only", "--json" });
+    try std.testing.expectEqual(@as(u8, 0), try executeReviewOnly(&test_context.context, &invocation.dispatch));
+    const document = try std.json.parseFromSlice(std.json.Value, allocator, test_context.stdout.writer.buffered(), .{});
+    try std.testing.expect(document.value == .object);
+    try std.testing.expectError(error.FileNotFound, temporary.dir.access(io, "lifecycle-ran", .{}));
+}
+
 test "issue 1880 preparation failure reaches JSON and persistent log before build" {
     const spec = @import("../cli/spec.zig");
     const logging = @import("../runtime/log.zig");

@@ -250,6 +250,8 @@ pub fn cause(err: anyerror) []const u8 {
         error.ConflictingPackageFunctions => "The PKGBUILD declares conflicting generic and package-specific functions. Review which function should package the selected output.",
         error.MissingPackageFunction => "The PKGBUILD is missing its package() function. Review the package definition.",
         error.InvalidDynamicScalarOutput, error.InvalidDynamicArrayOutput, error.InvalidDynamicShellOptionOutput => "The metadata subprocess returned invalid output. Review the dynamic metadata and build details.",
+        error.UnsupportedArrayExpansion => "This PKGBUILD uses an array expansion Shelly cannot resolve. Use a standalone quoted array reference with a supported literal, * or ? trimming pattern, or explicit array entries.",
+        error.ArrayExpansionTooDeep, error.ArrayExpansionTooLarge => "The PKGBUILD array expansion exceeds Shelly's nesting or element limit. Simplify the array assignments.",
         error.UnresolvedPkgbuildVariable => "The PKGBUILD contains an expression Shelly could not resolve. Review the reported field and source location.",
         error.MissingPkgbuildSourceFile => "A local source referenced by the PKGBUILD is missing. Restore the source or correct its path.",
         error.UnsafePkgbuildSourcePath => "A local source is not a regular file inside the package directory. Review the reported source path.",
