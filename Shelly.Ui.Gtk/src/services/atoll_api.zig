@@ -84,7 +84,7 @@ pub const AtollApiService = struct {
 
         const url = try std.fmt.allocPrint(
             self.allocator,
-            "{s}/v1/search?query={s}",
+            "{s}/v1/search?query={s}&by=Words",
             .{ base_url, encoded },
         );
         defer self.allocator.free(url);
