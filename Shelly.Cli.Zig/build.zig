@@ -104,6 +104,11 @@ pub fn build(b: *std.Build) void {
             "isolated child arguments",
             "isolated dependency review",
             "isolated configuration preserves build policy",
+            "invoking user build arguments",
+            "build install options parse",
+            "build install rejects output modes",
+            "artifact report",
+            "host coordinator",
         },
     });
     const run_builder_tests = b.addRunArtifact(builder_tests);
