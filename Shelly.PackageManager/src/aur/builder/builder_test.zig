@@ -3799,6 +3799,195 @@ test "PackageBuilder extracts source archives into srcdir" {
     try fixture.temporary.dir.access(io, "pkg/demo/usr/share/demo/source.txt", .{});
 }
 
+test "PackageBuilder extracts libblockdev source hard links and forward chains" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('payload.tar.gz')
+        \\sha256sums=('SKIP')
+        \\prepare() {
+        \\  test "$(cat "$srcdir/libblockdev-3.5.0/data/conf.d/00-default.cfg")" = default || return 1
+        \\  test "$(cat "$srcdir/libblockdev-3.5.0/data/conf.d/10-lvm-dbus.cfg")" = dbus || return 1
+        \\  test "$(cat "$srcdir/forward")" = default || return 1
+        \\}
+        \\package() {
+        \\  install -Dm644 "$srcdir/forward" "$pkgdir/usr/share/demo/config"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    const archive_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "payload.tar.gz" });
+    defer allocator.free(archive_path);
+    const mtime: std.Io.Timestamp = .{ .nanoseconds = 1_234_567_890_000_000_000 };
+    try archive.writeFixture(allocator, archive_path, .gzip, &.{
+        .{ .path = "forward", .kind = .hard_link, .link_target = "chain", .permissions = 0o777 },
+        .{ .path = "chain", .kind = .hard_link, .link_target = "./libblockdev-3.5.0/data/conf.d/00-default.cfg" },
+        .{ .path = "libblockdev-3.5.0/data/conf.d", .kind = .directory, .mtime = mtime },
+        .{ .path = "libblockdev-3.5.0/tests/test_configs/default_config/00-default.cfg", .contents = "default\n", .permissions = 0o640, .mtime = mtime },
+        .{ .path = "libblockdev-3.5.0/tests/test_configs/lvm_dbus_config/00-default.cfg", .kind = .hard_link, .link_target = "libblockdev-3.5.0/tests/test_configs/default_config/00-default.cfg" },
+        .{ .path = "libblockdev-3.5.0/tests/test_configs/lvm_dbus_config/10-lvm-dbus.cfg", .contents = "dbus\n" },
+        .{ .path = "libblockdev-3.5.0/data/conf.d/00-default.cfg", .kind = .hard_link, .link_target = "libblockdev-3.5.0/tests/test_configs/default_config/00-default.cfg" },
+        .{ .path = "libblockdev-3.5.0/data/conf.d/10-lvm-dbus.cfg", .kind = .hard_link, .link_target = "libblockdev-3.5.0/tests/test_configs/lvm_dbus_config/10-lvm-dbus.cfg" },
+    });
+    fixture.builder.options.sources_prepared = false;
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const original = try fixture.temporary.dir.statFile(io, "src/libblockdev-3.5.0/tests/test_configs/default_config/00-default.cfg", .{});
+    for ([_][]const u8{
+        "src/forward",
+        "src/chain",
+        "src/libblockdev-3.5.0/tests/test_configs/lvm_dbus_config/00-default.cfg",
+        "src/libblockdev-3.5.0/data/conf.d/00-default.cfg",
+    }) |path| {
+        const stat = try fixture.temporary.dir.statFile(io, path, .{ .follow_symlinks = false });
+        try testing.expectEqual(std.Io.File.Kind.file, stat.kind);
+        try testing.expectEqual(original.inode, stat.inode);
+        try testing.expectEqual(original.permissions.toMode(), stat.permissions.toMode());
+        try testing.expectEqual(mtime.nanoseconds, stat.mtime.nanoseconds);
+    }
+    const dbus = try fixture.temporary.dir.statFile(io, "src/libblockdev-3.5.0/tests/test_configs/lvm_dbus_config/10-lvm-dbus.cfg", .{});
+    const dbus_link = try fixture.temporary.dir.statFile(io, "src/libblockdev-3.5.0/data/conf.d/10-lvm-dbus.cfg", .{});
+    try testing.expectEqual(dbus.inode, dbus_link.inode);
+    const directory = try fixture.temporary.dir.statFile(io, "src/libblockdev-3.5.0/data/conf.d", .{});
+    try testing.expectEqual(mtime.nanoseconds, directory.mtime.nanoseconds);
+}
+
+test "PackageBuilder resolves long forward source hard link chains" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('payload.tar.gz')
+        \\sha256sums=('SKIP')
+        \\package() { install -Dm644 "$srcdir/links/0" "$pkgdir/usr/share/demo/data"; }
+    , null, null);
+    defer fixture.destroy();
+    const entries = try allocator.alloc(archive.FixtureEntry, 2049);
+    defer allocator.free(entries);
+    var count: usize = 0;
+    defer for (entries[0..count]) |entry| allocator.free(entry.path);
+    for (entries, 0..) |*entry, index| {
+        entry.* = .{ .path = try std.fmt.allocPrintSentinel(allocator, "links/{d}", .{index}, 0) };
+        count += 1;
+    }
+    for (entries[0 .. entries.len - 1], 0..) |*entry, index| {
+        entry.kind = .hard_link;
+        entry.link_target = entries[index + 1].path;
+    }
+    entries[entries.len - 1].contents = "long chain payload";
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "payload.tar.gz" });
+    defer allocator.free(path);
+    try archive.writeFixture(allocator, path, .gzip, entries);
+    fixture.builder.options.sources_prepared = false;
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const first = try fixture.temporary.dir.statFile(testing.io, "src/links/0", .{});
+    const last = try fixture.temporary.dir.statFile(testing.io, "src/links/2048", .{});
+    try testing.expectEqual(first.inode, last.inode);
+    const contents = try fixture.temporary.dir.readFileAlloc(testing.io, "pkg/demo/usr/share/demo/data", allocator, .unlimited);
+    defer allocator.free(contents);
+    try testing.expectEqualStrings("long chain payload", contents);
+}
+
+test "PackageBuilder rejects source hard link targets from another archive" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('first.tar.gz' 'second.tar.gz')
+        \\sha256sums=('SKIP' 'SKIP')
+        \\package() { mkdir -p "$pkgdir"; }
+    , null, null);
+    defer fixture.destroy();
+    const first = try std.fs.path.join(allocator, &.{ fixture.build_dir, "first.tar.gz" });
+    defer allocator.free(first);
+    const second = try std.fs.path.join(allocator, &.{ fixture.build_dir, "second.tar.gz" });
+    defer allocator.free(second);
+    try archive.writeFixture(allocator, first, .gzip, &.{.{ .path = "original", .contents = "previous archive" }});
+    try archive.writeFixture(allocator, second, .gzip, &.{.{ .path = "link", .kind = .hard_link, .link_target = "original" }});
+    fixture.builder.options.sources_prepared = false;
+    try fixture.temporary.dir.deleteTree(testing.io, "src");
+    try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(testing.io, "src", .{}));
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(testing.io, ".src.shelly-staging", .{}));
+}
+
+test "PackageBuilder rejects unsafe source hard links and preserves srcdir" {
+    const cases = [_][]const archive.FixtureEntry{
+        &.{.{ .path = "link", .kind = .hard_link, .link_target = "../outside" }},
+        &.{.{ .path = "../outside", .kind = .hard_link, .link_target = "original" }},
+        &.{.{ .path = "link", .kind = .hard_link, .link_target = "/etc/passwd" }},
+        &.{.{ .path = "link", .kind = .hard_link, .link_target = "missing" }},
+        &.{.{ .path = "link", .kind = .hard_link, .link_target = "./link" }},
+        &.{ .{ .path = "link", .kind = .hard_link, .link_target = "other" }, .{ .path = "other", .kind = .hard_link, .link_target = "link" } },
+        &.{ .{ .path = "dir", .kind = .directory }, .{ .path = "link", .kind = .hard_link, .link_target = "dir" } },
+        &.{ .{ .path = "original", .contents = "data" }, .{ .path = "symlink", .link_target = "original" }, .{ .path = "link", .kind = .hard_link, .link_target = "symlink" } },
+        &.{ .{ .path = "original", .contents = "data" }, .{ .path = "symlink", .link_target = "." }, .{ .path = "link", .kind = .hard_link, .link_target = "symlink/original" } },
+        &.{ .{ .path = "original", .contents = "data" }, .{ .path = "symlink", .link_target = "." }, .{ .path = "symlink/link", .kind = .hard_link, .link_target = "original" } },
+        &.{ .{ .path = "original", .contents = "data" }, .{ .path = "link", .contents = "keep" }, .{ .path = "link", .kind = .hard_link, .link_target = "original" } },
+        &.{ .{ .path = "link", .kind = .hard_link, .link_target = "original" }, .{ .path = "link", .contents = "collision" }, .{ .path = "original", .contents = "data" } },
+        &.{ .{ .path = "link", .kind = .hard_link, .link_target = "original" }, .{ .path = "link", .link_target = "original" }, .{ .path = "original", .contents = "data" } },
+        &.{ .{ .path = "link", .kind = .hard_link, .link_target = "original" }, .{ .path = "link", .kind = .directory }, .{ .path = "original", .contents = "data" } },
+        &.{ .{ .path = "link", .kind = .hard_link, .link_target = "original" }, .{ .path = "link/child", .contents = "collision" }, .{ .path = "original", .contents = "data" } },
+        &.{ .{ .path = "link", .kind = .hard_link, .link_target = "original" }, .{ .path = "./link", .kind = .hard_link, .link_target = "original" }, .{ .path = "original", .contents = "data" } },
+    };
+    const Capture = struct {
+        detailed_error: bool = false,
+        link_target_seen: bool = false,
+        fn handle(data: ?*anyopaque, event: op_context.Event) void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            if (event == .failure) {
+                const message = event.failure.message;
+                if (std.mem.indexOf(u8, message, "payload.tar.gz") != null and
+                    std.mem.indexOf(u8, message, "entry") != null)
+                    self.detailed_error = true;
+                if (std.mem.indexOf(u8, message, "link target") != null and
+                    std.mem.indexOf(u8, message, "../outside") != null)
+                    self.link_target_seen = true;
+            }
+        }
+    };
+    for (cases) |entries| {
+        var capture: Capture = .{};
+        var fixture = try Fixture.create(testing.allocator,
+            \\pkgname=demo
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('payload.tar.gz')
+            \\sha256sums=('SKIP')
+            \\prepare() { touch "$startdir/prepare-ran"; }
+            \\package() { mkdir -p "$pkgdir"; }
+        , .{ .function = Capture.handle, .data = &capture }, null);
+        defer fixture.destroy();
+        const path = try std.fs.path.join(testing.allocator, &.{ fixture.build_dir, "payload.tar.gz" });
+        defer testing.allocator.free(path);
+        try archive.writeFixture(testing.allocator, path, .gzip, entries);
+        try fixture.temporary.dir.writeFile(testing.io, .{ .sub_path = "src/keep", .data = "previous source tree" });
+        try fixture.temporary.dir.writeFile(testing.io, .{ .sub_path = "outside", .data = "untouched" });
+        fixture.builder.options.sources_prepared = false;
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        try testing.expect(capture.detailed_error);
+        if (std.mem.eql(u8, entries[0].link_target orelse "", "../outside"))
+            try testing.expect(capture.link_target_seen);
+        const kept = try fixture.temporary.dir.readFileAlloc(testing.io, "src/keep", testing.allocator, .unlimited);
+        defer testing.allocator.free(kept);
+        try testing.expectEqualStrings("previous source tree", kept);
+        const outside = try fixture.temporary.dir.readFileAlloc(testing.io, "outside", testing.allocator, .unlimited);
+        defer testing.allocator.free(outside);
+        try testing.expectEqualStrings("untouched", outside);
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(testing.io, ".src.shelly-staging", .{}));
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(testing.io, "prepare-ran", .{}));
+    }
+}
+
 test "PackageBuilder issue 1910 plain text sources are not extracted as mtree" {
     const allocator = testing.allocator;
     const io = testing.io;
