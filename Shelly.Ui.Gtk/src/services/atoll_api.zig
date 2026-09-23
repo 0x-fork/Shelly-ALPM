@@ -174,9 +174,16 @@ pub const AtollApiService = struct {
         numVotes: ?i64 = null,
         popularity: ?f64 = null,
         outOfDate: ?i64 = null,
-        upstreamPackageBase: ?[]const u8 = null,
-        createdAt: ?[]const u8 = null,
-        updatedAt: ?[]const u8 = null,
+        url: ?[]const u8 = null,
+        maintainer: ?[]const u8 = null,
+        packageBase: ?[]const u8 = null,
+        firstSubmitted: ?i64 = null,
+        lastModified: ?i64 = null,
+        license: ?[]const []const u8 = null,
+        depends: ?[]const []const u8 = null,
+        makeDepends: ?[]const []const u8 = null,
+        optDepends: ?[]const []const u8 = null,
+        provides: ?[]const []const u8 = null,
     };
 
     const WireIndexResponse = struct {
@@ -219,17 +226,22 @@ pub const AtollApiService = struct {
             .Id = 0,
             .Name = try allocator.dupeZ(u8, wire.name),
             .PackageBaseId = 0,
-            .PackageBase = try allocator.dupeZ(u8, wire.upstreamPackageBase orelse wire.name),
+            .PackageBase = try allocator.dupeZ(u8, wire.packageBase orelse wire.name),
             .Version = try allocator.dupeZ(u8, wire.version orelse ""),
             .Description = try dupeOptionalZ(allocator, wire.description),
-            .Url = null,
+            .Url = try dupeOptionalZ(allocator, wire.url),
             .NumVotes = toU32(wire.numVotes),
             .Popularity = wire.popularity orelse 0,
             .OutOfDate = wire.outOfDate,
-            .Maintainer = null,
-            .FirstSubmitted = isoTimestampToEpoch(wire.createdAt),
-            .LastModified = isoTimestampToEpoch(wire.updatedAt),
+            .Maintainer = try dupeOptionalZ(allocator, wire.maintainer),
+            .FirstSubmitted = wire.firstSubmitted orelse 0,
+            .LastModified = wire.lastModified orelse 0,
             .UrlPath = try allocator.dupeZ(u8, ""),
+            .Depends = try dupeStrings(allocator, wire.depends),
+            .MakeDepends = try dupeStrings(allocator, wire.makeDepends),
+            .OptDepends = try dupeStrings(allocator, wire.optDepends),
+            .Provides = try dupeStrings(allocator, wire.provides),
+            .License = try dupeStrings(allocator, wire.license),
         };
     }
 
@@ -283,41 +295,6 @@ pub const AtollApiService = struct {
         if (raw <= 0) return 0;
         return @intCast(@min(raw, std.math.maxInt(u32)));
     }
-
-    fn isoTimestampToEpoch(raw: ?[]const u8) i64 {
-        const value = raw orelse return 0;
-        if (value.len < 19) return 0;
-
-        const year = std.fmt.parseInt(i64, value[0..4], 10) catch return 0;
-        const month = std.fmt.parseInt(i64, value[5..7], 10) catch return 0;
-        const day = std.fmt.parseInt(i64, value[8..10], 10) catch return 0;
-        const hour = std.fmt.parseInt(i64, value[11..13], 10) catch return 0;
-        const minute = std.fmt.parseInt(i64, value[14..16], 10) catch return 0;
-        const second = std.fmt.parseInt(i64, value[17..19], 10) catch return 0;
-
-        if (month < 1 or month > 12) return 0;
-        if (day < 1 or day > 31) return 0;
-        if (hour > 23 or minute > 59 or second > 60) return 0;
-
-        const seconds_per_day: i64 = 24 * 60 * 60;
-        return daysFromCivil(year, month, day) * seconds_per_day +
-            hour * 3600 +
-            minute * 60 +
-            second;
-    }
-
-    fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
-        const shifted_year = year - @as(i64, if (month <= 2) 1 else 0);
-        const era = @divFloor(if (shifted_year >= 0) shifted_year else shifted_year - 399, 400);
-        const year_of_era = shifted_year - era * 400;
-        const month_shift: i64 = if (month > 2) -3 else 9;
-        const day_of_year = @divTrunc(153 * (month + month_shift) + 2, 5) + day - 1;
-        const day_of_era = year_of_era * 365 +
-            @divTrunc(year_of_era, 4) -
-            @divTrunc(year_of_era, 100) +
-            day_of_year;
-        return era * 146097 + day_of_era - 719468;
-    }
 };
 
 const testing = std.testing;
@@ -335,9 +312,14 @@ test "parseIndexPage maps a real Atoll index response" {
     const json =
         \\{"items":[{"name":"yay","createdAt":"2026-08-21T19:29:03.4196219+00:00",
         \\"updatedAt":"2026-08-21T19:29:03.4196219+00:00",
-        \\"headRevisionId":"04762df5","revisionCount":1,"upstreamPackageBase":null,
-        \\"description":"Yet another yogurt.","version":"13.0.1-1","numVotes":2654,
-        \\"popularity":33.082352,"outOfDate":null}],
+        \\"headRevisionId":"04762df5f26c37a6c1c3ce77108bea56ee5f94bf9aece804d5499455378d88bf",
+        \\"revisionCount":1,
+        \\"description":"Yet another yogurt. Pacman wrapper and AUR helper written in go.",
+        \\"version":"13.0.1-1","numVotes":2653,"popularity":28.983324,"outOfDate":null,
+        \\"url":"https://github.com/Jguer/yay","maintainer":"jguer","packageBase":"yay",
+        \\"firstSubmitted":1475688004,"lastModified":1781905288,
+        \\"license":["GPL-3.0-or-later"],"depends":["pacman>6.1","git"],
+        \\"makeDepends":["go>=1.24"],"optDepends":["sudo","doas"],"provides":[]}],
         \\"page":1,"limit":50,"totalItems":119373,"totalPages":2388}
     ;
 
@@ -352,15 +334,84 @@ test "parseIndexPage maps a real Atoll index response" {
     try testing.expectEqualStrings("yay", pkg.Name);
     try testing.expectEqualStrings("yay", pkg.PackageBase);
     try testing.expectEqualStrings("13.0.1-1", pkg.Version);
-    try testing.expectEqualStrings("Yet another yogurt.", pkg.Description.?);
-    try testing.expectEqual(@as(u32, 2654), pkg.NumVotes);
-    try testing.expectEqual(@as(f64, 33.082352), pkg.Popularity);
+    try testing.expectEqualStrings("Yet another yogurt. Pacman wrapper and AUR helper written in go.", pkg.Description.?);
+    try testing.expectEqualStrings("https://github.com/Jguer/yay", pkg.Url.?);
+    try testing.expectEqualStrings("jguer", pkg.Maintainer.?);
+    try testing.expectEqual(@as(u32, 2653), pkg.NumVotes);
+    try testing.expectEqual(@as(f64, 28.983324), pkg.Popularity);
     try testing.expect(pkg.OutOfDate == null);
-    try testing.expect(pkg.Maintainer == null);
-    try testing.expectEqual(@as(i64, 1787340543), pkg.FirstSubmitted);
-    try testing.expectEqual(@as(i64, 1787340543), pkg.LastModified);
+    try testing.expectEqual(@as(i64, 1475688004), pkg.FirstSubmitted);
+    try testing.expectEqual(@as(i64, 1781905288), pkg.LastModified);
+    try testing.expectEqualStrings("GPL-3.0-or-later", pkg.License.?[0]);
+    try testing.expectEqual(@as(usize, 2), pkg.Depends.?.len);
+    try testing.expectEqualStrings("pacman>6.1", pkg.Depends.?[0]);
+    try testing.expectEqualStrings("git", pkg.Depends.?[1]);
+    try testing.expectEqualStrings("go>=1.24", pkg.MakeDepends.?[0]);
+    try testing.expectEqualStrings("sudo", pkg.OptDepends.?[0]);
+    try testing.expectEqualStrings("doas", pkg.OptDepends.?[1]);
+    try testing.expectEqual(@as(usize, 0), pkg.Provides.?.len);
     try testing.expectEqualStrings("", pkg.UrlPath);
+}
+
+test "parseIndexPage maps a split package row" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = makeService(&arena, testing.io);
+    defer svc.deinit();
+
+    const json =
+        \\{"items":[{"name":"0ad-data-git",
+        \\"description":"Cross-platform, 3D and historically-based real-time strategy game (git version) (data files)",
+        \\"version":"1:a26.r2110.g14a5ccee52-1","numVotes":8,"popularity":0.016441,
+        \\"outOfDate":null,"url":"https://play0ad.com","maintainer":"tuxayo",
+        \\"packageBase":"0ad-git","firstSubmitted":1473420716,"lastModified":1765833977,
+        \\"license":["cc-by-nc-sa-3.0"],"depends":[],"makeDepends":["boost","cmake"],
+        \\"optDepends":[],"provides":["0ad-data"]}],
+        \\"page":1,"limit":50,"totalItems":1,"totalPages":1}
+    ;
+
+    const index = try svc.parseIndexPage(json);
+
+    const pkg = index.packages[0];
+    try testing.expectEqualStrings("0ad-data-git", pkg.Name);
+    try testing.expectEqualStrings("0ad-git", pkg.PackageBase);
+    try testing.expectEqual(@as(usize, 0), pkg.Depends.?.len);
+    try testing.expectEqual(@as(usize, 0), pkg.OptDepends.?.len);
+    try testing.expectEqual(@as(usize, 2), pkg.MakeDepends.?.len);
+    try testing.expectEqualStrings("0ad-data", pkg.Provides.?[0]);
+    try testing.expectEqualStrings("cc-by-nc-sa-3.0", pkg.License.?[0]);
+    try testing.expectEqual(@as(i64, 1473420716), pkg.FirstSubmitted);
+    try testing.expectEqual(@as(i64, 1765833977), pkg.LastModified);
+}
+
+test "parseIndexPage keeps nulls for a package absent from the dump" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = makeService(&arena, testing.io);
+    defer svc.deinit();
+
+    const json =
+        \\{"items":[{"name":"pruned-pkg","description":null,"version":null,
+        \\"numVotes":null,"popularity":null,"outOfDate":null,"url":null,
+        \\"maintainer":null,"packageBase":null,"firstSubmitted":null,
+        \\"lastModified":null,"license":null,"depends":null,"makeDepends":null,
+        \\"optDepends":null,"provides":null}],
+        \\"page":1,"limit":50,"totalItems":1,"totalPages":1}
+    ;
+
+    const index = try svc.parseIndexPage(json);
+
+    const pkg = index.packages[0];
+    try testing.expectEqualStrings("pruned-pkg", pkg.PackageBase);
+    try testing.expect(pkg.Url == null);
+    try testing.expect(pkg.Maintainer == null);
+    try testing.expect(pkg.License == null);
     try testing.expect(pkg.Depends == null);
+    try testing.expect(pkg.MakeDepends == null);
+    try testing.expect(pkg.OptDepends == null);
+    try testing.expect(pkg.Provides == null);
+    try testing.expectEqual(@as(i64, 0), pkg.FirstSubmitted);
+    try testing.expectEqual(@as(i64, 0), pkg.LastModified);
 }
 
 test "parseIndexPage tolerates an empty page" {
@@ -440,28 +491,6 @@ test "parseSearch handles an empty result set" {
     try testing.expectEqual(@as(usize, 0), packages.len);
 }
 
-test "isoTimestampToEpoch reads UTC timestamps and rejects junk" {
-    try testing.expectEqual(
-        @as(i64, 1787340543),
-        AtollApiService.isoTimestampToEpoch("2026-08-21T19:29:03.4196219+00:00"),
-    );
-    try testing.expectEqual(
-        @as(i64, 0),
-        AtollApiService.isoTimestampToEpoch("1970-01-01T00:00:00Z"),
-    );
-    try testing.expectEqual(@as(i64, 0), AtollApiService.isoTimestampToEpoch(null));
-    try testing.expectEqual(@as(i64, 0), AtollApiService.isoTimestampToEpoch(""));
-    try testing.expectEqual(@as(i64, 0), AtollApiService.isoTimestampToEpoch("not-a-timestamp"));
-    try testing.expectEqual(@as(i64, 0), AtollApiService.isoTimestampToEpoch("2026-13-01T00:00:00Z"));
-}
-
-test "daysFromCivil matches known dates" {
-    try testing.expectEqual(@as(i64, 0), AtollApiService.daysFromCivil(1970, 1, 1));
-    try testing.expectEqual(@as(i64, 1), AtollApiService.daysFromCivil(1970, 1, 2));
-    try testing.expectEqual(@as(i64, -1), AtollApiService.daysFromCivil(1969, 12, 31));
-    try testing.expectEqual(@as(i64, 20686), AtollApiService.daysFromCivil(2026, 8, 21));
-}
-
 test "percentEncode escapes characters that are not query safe" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -491,6 +520,7 @@ test "live: getIndexPage returns a page of packages" {
     try testing.expect(index.packages.len <= 3);
     try testing.expect(index.total_pages > 1);
     try testing.expect(index.packages[0].Name.len > 0);
+    try testing.expect(index.packages[0].PackageBase.len > 0);
 }
 
 test "live: search finds a package by name" {
