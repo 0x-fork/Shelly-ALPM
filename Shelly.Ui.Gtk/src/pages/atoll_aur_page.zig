@@ -149,6 +149,7 @@ pub const AtollAurPage = extern struct {
         _ = gtk.CheckButton.signals.toggled.connect(p.run_checks_check, *Self, &on_run_checks_toggled, self, .{});
 
         const detail = AurPackageDetail.new();
+        detail.setLinkBase(AtollApiService.base_url ++ "/package/");
         p.aur_detail = detail;
         gtk.Revealer.setChild(p.detail_revealer, detail.as(gtk.Widget));
 
