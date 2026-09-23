@@ -61,10 +61,6 @@ pub const AppImageManager = struct {
         return std.ascii.eqlIgnoreCase(std.fs.path.extension(file_path), ".AppImage");
     }
 
-    pub fn is_app_image(file_path: []const u8) bool {
-        return isAppImage(file_path);
-    }
-
     pub fn installAppImage(self: AppImageManager, location: []const u8) !bool {
         try ensureNonRootMutation();
         var operation_scope = events.OperationScope.init(self.operation_context, self.dispatcher, .install, location);
@@ -2468,7 +2464,7 @@ test "writeDesktopEntry emits unquoted TryExec for existing and omitted source k
 
 test "AppImage classification is case insensitive and extension based" {
     try std.testing.expect(AppImageManager.isAppImage("Example.AppImage"));
-    try std.testing.expect(AppImageManager.is_app_image("/tmp/Example.appimage"));
+    try std.testing.expect(AppImageManager.isAppImage("/tmp/Example.appimage"));
     try std.testing.expect(!AppImageManager.isAppImage("Example.AppImage.zsync"));
     try std.testing.expect(!AppImageManager.isAppImage("AppImage"));
 }

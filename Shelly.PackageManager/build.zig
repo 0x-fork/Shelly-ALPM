@@ -886,7 +886,6 @@ pub fn build(b: *std.Build) void {
             "AppImage desktop entry detection requires a leading Desktop Entry group",
             "AppImage icon discovery keeps the desktop id suffix of an Icon value",
             "AppImage metadata discovery rejects symlinks outside the extraction root",
-            "test isAppImage",
             "get_update returns optional owned results for configured providers",
             "providerUpdateOrWarn",
             "get_updates returns an owned update list",
