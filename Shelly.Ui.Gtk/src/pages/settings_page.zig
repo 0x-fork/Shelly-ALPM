@@ -9,6 +9,7 @@ const ShellyTabs = @import("../models/shelly_config.zig").ShellyTabs;
 const DayOfWeek = @import("../models/shelly_config.zig").DayOfWeek;
 const NavMode = @import("../models/shelly_config.zig").NavMode;
 const ConfigResolver = @import("../services/ui_config_resolver.zig").ConfigResolver;
+const ConfigError = @import("../services/ui_config_resolver.zig").ConfigError;
 const CliConfigResolver = @import("../services/cli_config_resolver.zig").CliConfigResolver;
 const ShellyCommands = @import("../services/shelly_operation.zig").ShellyCommands;
 const support_packages = @import("../services/support_packages.zig");
@@ -1276,7 +1277,7 @@ fn populatePageDropdown(p: *ShellySettingsPage.Private, cfg: *const ShellyConfig
 }
 
 fn obtainConfigService() !*ConfigResolver {
-    return runtime.config.?;
+    return runtime.config orelse ConfigError.NotLoaded;
 }
 
 fn updateConfigField(
@@ -1578,4 +1579,12 @@ fn navModeIndex(mode: NavMode) c_uint {
         if (entry.value == mode) return @intCast(i);
     }
     return 0;
+}
+
+test "a missing config service is reported instead of crashing the page" {
+    const previous = runtime.config;
+    defer runtime.config = previous;
+
+    runtime.config = null;
+    try std.testing.expectError(ConfigError.NotLoaded, obtainConfigService());
 }
