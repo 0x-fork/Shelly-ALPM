@@ -521,7 +521,7 @@ pub const AppImageManager = struct {
         const requested_name = requestedIconName(icon_value);
         var best_path: ?[]u8 = null;
         errdefer if (best_path) |path| self.allocator.free(path);
-        var best_score: u8 = 0;
+        var best_score: u32 = 0;
 
         if (requested_name.len > 0) {
             var walker = try d.walk(self.allocator);
@@ -1651,12 +1651,27 @@ fn requestedIconName(icon_value: []const u8) []const u8 {
     return name;
 }
 
-fn iconSourceScore(path: []const u8, extension: []const u8) u8 {
-    if (std.mem.indexOf(u8, path, "icons/hicolor/scalable/apps/") != null) return 7;
-    if (std.mem.indexOf(u8, path, "icons/hicolor/256x256/apps/") != null) return 6;
-    if (std.mem.indexOf(u8, path, "icons/hicolor/512x512/apps/") != null) return 5;
-    if (std.ascii.eqlIgnoreCase(extension, ".svg")) return 4;
-    return 1;
+/// A vector serves any size a theme asks for, so it outranks every raster. Among rasters the
+/// largest one wins: downscaling is lossless and upscaling is not, and pixel counts are nominal
+/// per the icon theme layout, so they can never reach the vector tier.
+fn iconSourceScore(path: []const u8, extension: []const u8) u32 {
+    if (std.mem.indexOf(u8, path, "icons/hicolor/scalable/apps/") != null) return std.math.maxInt(u32);
+    if (std.ascii.eqlIgnoreCase(extension, ".svg")) return 1 << 24;
+    return nominalRasterSize(path);
+}
+
+/// Icon theme directories carry the nominal pixel size in their name, e.g. `128x128/apps`.
+/// Anything else, a scaled `48x48@2` included, leaves the raster unranked but still usable.
+fn nominalRasterSize(path: []const u8) u32 {
+    var largest: u32 = 0;
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| {
+        const separator = std.mem.indexOfScalar(u8, component, 'x') orelse continue;
+        const width = std.fmt.parseInt(u32, component[0..separator], 10) catch continue;
+        const height = std.fmt.parseInt(u32, component[separator + 1 ..], 10) catch continue;
+        largest = @max(largest, @min(width, height));
+    }
+    return largest;
 }
 
 fn writeTestAppImageDb(path: []const u8, contents: []const u8) !void {
@@ -2575,7 +2590,7 @@ test "AppImage desktop entry detection requires a leading Desktop Entry group" {
     }
 }
 
-test "AppImage icon discovery keeps the desktop id suffix of an Icon value" {
+test "AppImage icon discovery matches the Icon name and prefers the best shipped source" {
     const cases = [_]struct {
         icon_value: []const u8,
         shipped: []const []const u8,
@@ -2603,6 +2618,40 @@ test "AppImage icon discovery keeps the desktop id suffix of an Icon value" {
             .icon_value = "editor",
             .shipped = &.{"usr/share/icons/hicolor/64x64/apps/other.png"},
             .expected = null,
+        },
+        .{
+            .icon_value = "editor",
+            .shipped = &.{
+                "usr/share/icons/hicolor/32x32/apps/editor.png",
+                "usr/share/icons/hicolor/64x64/apps/editor.png",
+                "usr/share/icons/hicolor/128x128/apps/editor.png",
+            },
+            .expected = "usr/share/icons/hicolor/128x128/apps/editor.png",
+        },
+        .{
+            .icon_value = "editor",
+            .shipped = &.{
+                "usr/share/icons/hicolor/128x128/apps/editor.png",
+                "usr/share/icons/hicolor/64x64/apps/editor.png",
+                "usr/share/icons/hicolor/32x32/apps/editor.png",
+            },
+            .expected = "usr/share/icons/hicolor/128x128/apps/editor.png",
+        },
+        .{
+            .icon_value = "editor",
+            .shipped = &.{
+                "usr/share/icons/hicolor/256x256/apps/editor.png",
+                "usr/share/icons/hicolor/512x512/apps/editor.png",
+            },
+            .expected = "usr/share/icons/hicolor/512x512/apps/editor.png",
+        },
+        .{
+            .icon_value = "editor",
+            .shipped = &.{
+                "usr/share/icons/hicolor/1024x1024/apps/editor.png",
+                "usr/share/icons/hicolor/scalable/apps/editor.svg",
+            },
+            .expected = "usr/share/icons/hicolor/scalable/apps/editor.svg",
         },
     };
     for (cases) |case| {

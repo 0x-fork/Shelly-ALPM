@@ -884,7 +884,7 @@ pub fn build(b: *std.Build) void {
             "AppImage classification is case insensitive and extension based",
             "AppImage desktop discovery skips files that only borrow the desktop extension",
             "AppImage desktop entry detection requires a leading Desktop Entry group",
-            "AppImage icon discovery keeps the desktop id suffix of an Icon value",
+            "AppImage icon discovery matches the Icon name and prefers the best shipped source",
             "AppImage metadata discovery rejects symlinks outside the extraction root",
             "get_update returns optional owned results for configured providers",
             "providerUpdateOrWarn",
