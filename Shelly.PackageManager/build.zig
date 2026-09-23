@@ -863,6 +863,15 @@ pub fn build(b: *std.Build) void {
     const run_source_compression_tests = b.addRunArtifact(source_compression_tests);
     aur_test_step.dependOn(&run_source_compression_tests.step);
     test_step.dependOn(&run_source_compression_tests.step);
+    const source_archive_tests = b.addTest(.{
+        .name = "source-archive-test",
+        .root_module = archive_mod,
+        .filters = &.{"archive reader"},
+    });
+    const run_source_archive_tests = b.addRunArtifact(source_archive_tests);
+    b.step("source-archive-test", "Run source archive reader regressions").dependOn(&run_source_archive_tests.step);
+    builder_test_step.dependOn(&run_source_archive_tests.step);
+    test_step.dependOn(&run_source_archive_tests.step);
 
     const appimage_tests = b.addTest(.{
         .name = "appimage-test",

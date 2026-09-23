@@ -119,8 +119,12 @@ pub const PackageDetail = extern struct {
         addSpecRow(p.spec_box, translations._("Popularity"), popularityText(&buf, package.Popularity));
 
         addSpecRow(p.spec_box, translations._("Maintainer"), if (package.Maintainer) |maintainer| c_string.cstr(&buf, maintainer) else "");
-        addSpecRow(p.spec_box, translations._("Last Modified"), c_string.cstr(&buf, formatIsoDateTime(&time_buf, package.LastModified) catch ""));
-        addSpecRow(p.spec_box, translations._("First Submitted"), c_string.cstr(&buf, formatIsoDateTime(&time_buf, package.FirstSubmitted) catch ""));
+        if (package.LastModified != 0) {
+            addSpecRow(p.spec_box, translations._("Last Modified"), c_string.cstr(&buf, formatIsoDateTime(&time_buf, package.LastModified) catch ""));
+        }
+        if (package.FirstSubmitted != 0) {
+            addSpecRow(p.spec_box, translations._("First Submitted"), c_string.cstr(&buf, formatIsoDateTime(&time_buf, package.FirstSubmitted) catch ""));
+        }
 
         addUrlSpecRow(p.spec_box, translations._("URL"), if (package.Url) |u| c_string.cstr(&buf, u) else "");
 
