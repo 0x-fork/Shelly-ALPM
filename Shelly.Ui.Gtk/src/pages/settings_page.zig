@@ -94,6 +94,7 @@ pub const ShellySettingsPage = extern struct {
         remove_cache_switch: *gtk.Switch,
         no_confirm_switch: *gtk.Switch,
         shelly_search_switch: *gtk.Switch,
+        atoll_aur_switch: *gtk.Switch,
         appimage_install_path_box: *gtk.Box,
         appimage_install_path_button: *gtk.Button,
 
@@ -223,6 +224,7 @@ pub const ShellySettingsPage = extern struct {
             p.tray_cron_switch,
             p.no_confirm_switch,
             p.shelly_search_switch,
+            p.atoll_aur_switch,
             p.remove_cache_switch,
         };
         inline for (autosave_switches) |s| {
@@ -1109,6 +1111,7 @@ pub const ShellySettingsPage = extern struct {
         .{ "remove_cache_switch", @offsetOf(Private, "remove_cache_switch") },
         .{ "no_confirm_switch", @offsetOf(Private, "no_confirm_switch") },
         .{ "shelly_search_switch", @offsetOf(Private, "shelly_search_switch") },
+        .{ "atoll_aur_switch", @offsetOf(Private, "atoll_aur_switch") },
         .{ "appimage_install_path_box", @offsetOf(Private, "appimage_install_path_box") },
         .{ "appimage_install_path_button", @offsetOf(Private, "appimage_install_path_button") },
 
@@ -1347,6 +1350,7 @@ fn applyConfig(p: *ShellySettingsPage.Private, cfg: *ShellyConfig) void {
     // Advanced
     setSwitch(p.no_confirm_switch, cfg.NoConfirm);
     setSwitch(p.shelly_search_switch, cfg.ShellySearchEnabled);
+    setSwitch(p.atoll_aur_switch, cfg.AtollAurEnabled);
     setSwitch(p.remove_cache_switch, cfg.PackageManagementRemoveConfigs);
 
     applyAppImageInstallPath(p);
@@ -1426,6 +1430,7 @@ fn collectIntoConfig(p: *ShellySettingsPage.Private, allocator: std.mem.Allocato
     // Advanced
     cfg.NoConfirm = getSwitch(p.no_confirm_switch);
     cfg.ShellySearchEnabled = getSwitch(p.shelly_search_switch);
+    cfg.AtollAurEnabled = getSwitch(p.atoll_aur_switch);
     cfg.PackageManagementRemoveConfigs = getSwitch(p.remove_cache_switch);
 }
 
