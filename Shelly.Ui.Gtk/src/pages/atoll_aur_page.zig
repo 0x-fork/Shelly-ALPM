@@ -59,6 +59,7 @@ pub const AtollAurPage = extern struct {
         arena: ?*std.heap.ArenaAllocator,
         generation: u64,
         loaded: bool,
+        loading: bool,
         applying_config: bool,
         installed_mode: bool,
         mode: Mode,
@@ -110,6 +111,7 @@ pub const AtollAurPage = extern struct {
         gtk.Widget.initTemplate(self.as(gtk.Widget));
         const p = self.priv();
         p.loaded = false;
+        p.loading = false;
         p.applying_config = false;
         p.arena = null;
         p.generation = 0;
@@ -264,6 +266,7 @@ pub const AtollAurPage = extern struct {
     fn on_selection_changed(_: *gobject.Object, _: *gobject.ParamSpec, self: *Self) callconv(.c) void {
         const p = self.priv();
         const obj = gtk.SingleSelection.getSelectedItem(p.selection) orelse {
+            if (p.loading) return;
             gtk.Revealer.setRevealChild(p.detail_revealer, 0);
             return;
         };
@@ -573,6 +576,7 @@ pub const AtollAurPage = extern struct {
         const p = self.priv();
         p.mode = mode;
         p.generation += 1;
+        p.loading = true;
         gio.ListStore.removeAll(p.list_store);
         self.update_selection_ui();
         self.update_pager();
@@ -580,9 +584,18 @@ pub const AtollAurPage = extern struct {
 
         const thread = std.Thread.spawn(.{}, load_worker, .{ self, p.generation, mode }) catch {
             self.set_state(.err);
+            self.end_load();
             return;
         };
         thread.detach();
+    }
+
+    fn end_load(self: *Self) void {
+        const p = self.priv();
+        p.loading = false;
+        if (gtk.SingleSelection.getSelectedItem(p.selection) == null) {
+            gtk.Revealer.setRevealChild(p.detail_revealer, 0);
+        }
     }
 
     fn load_worker(page: *Self, generation: u64, mode: Mode) void {
@@ -716,6 +729,7 @@ pub const AtollAurPage = extern struct {
         if (result.failed) {
             page.set_state(.err);
             page.update_selection_ui();
+            page.end_load();
             finish(result);
             return 0;
         }
@@ -729,6 +743,7 @@ pub const AtollAurPage = extern struct {
         if (result.packages.len == 0) {
             page.set_state(.empty);
             page.update_selection_ui();
+            page.end_load();
             finish(result);
             return 0;
         }
@@ -756,6 +771,8 @@ pub const AtollAurPage = extern struct {
         if (result.packages.len > 0) {
             _ = gtk.SelectionModel.selectItem(p.selection.as(gtk.SelectionModel), 0, 1);
         }
+
+        page.end_load();
 
         finish(result);
         return 0;
