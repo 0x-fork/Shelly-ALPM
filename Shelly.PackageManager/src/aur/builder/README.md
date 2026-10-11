@@ -32,8 +32,21 @@ selection, review sequencing, and evaluated-build lifetime; focused pipeline
 stages are delegated to sibling modules and passed the builder as
 `self: *PackageBuilder` for access to configuration, IO, and the active
 operation/log. `writeSrcinfoWithOperation` shares the reviewed sandboxed
-metadata-evaluation stage, then serializes SRCINFO through `aur/srcinfo.zig`
-without acquiring sources or invoking lifecycle functions.
+metadata-evaluation stage. If the evaluated PKGBUILD defines `pkgver()`, it
+shares the source acquisition, integrity verification, `verify()` (unless
+disabled), `prepare()`, and version-update pipeline with normal builds. It then
+serializes refreshed SRCINFO through `aur/srcinfo.zig`, including split-package
+fields that depend on the new version. It never runs `build()`, `check()`, or
+package functions. Without `pkgver()`, sources and lifecycle functions are
+skipped.
+
+Unlike `makepkg --printsrcinfo`, `shelly build --makesrcinfo` can download sources
+and update the selected PKGBUILD's version and release. Preparation tools must
+already be available. The CLI uses a temporary work directory and the configured
+source cache, preserving existing build trees and removing temporary work on
+success or failure. Progress goes to stderr; stdout contains only complete
+SRCINFO after successful preparation. Invalid versions or failed writeback
+produce no SRCINFO; an unwritable PKGBUILD is an error in this mode.
 
 Single-package PKGBUILDs without lifecycle functions are valid metapackages.
 They still undergo reviewed, sandboxed metadata evaluation and produce an
@@ -43,6 +56,9 @@ packages require a package function for every member.
 
 Each metadata evaluation sources the base PKGBUILD in a fresh Bash environment
 with the configured build flags and makepkg directory/architecture context.
+`SRCDEST` is exported from the resolved source destination for both metadata
+evaluation and lifecycle subprocesses; the sandbox grants that cache read/write
+access even when it is separate from the build tree.
 Previously evaluated declarations are never used as input. Names recognized by
 the static parser are tracked without assigning them, so the snapshot preserves
 unchanged values and explicit unsets as well as shell-created state. This keeps
@@ -60,6 +76,23 @@ remain on disk even if a later native build step fails.
 Version edits verify the reviewed inputs before writing and preserve the file's
 ownership and permissions. Only the version and release edit is automatically
 accepted; changed or newly discovered related inputs require another review.
+
+## Source archive overlays
+
+Source archives are extracted in `source=()` order. A later regular archive
+entry replaces an earlier regular archive entry at the same normalized path,
+including entries from another archive. The replacement gets the later entry's
+contents, permissions, and modification time. Files are unlinked and recreated,
+so existing hard links keep their original inode and contents. Hard-link targets
+must still belong to the same archive; link destinations and conflicting entry
+types cannot be replaced. Directories continue to merge.
+
+All source aliases are reserved before extraction, including later sources,
+`noextract` inputs, and Git checkout subtrees. Archive entries cannot overwrite
+these inputs or standalone decompression outputs. An archive may still extract
+its own matching root directory (for example, an extensionless renamed tarball);
+in that case its raw payload does not overwrite the extracted directory. Failed
+or cancelled extraction discards staging and preserves the previous source tree.
 
 ## Files
 

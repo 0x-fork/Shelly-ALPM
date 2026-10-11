@@ -1,23 +1,49 @@
 const std = @import("std");
 const PackageManager = @import("PackageManager");
 const runtime = @import("../runtime/context.zig");
-const RemovalPlan = PackageManager.Manager.CacheRemovalPlan;
+
+/// One immediate cache entry. A directory authorizes removal of all its contents.
+pub const RemovalPlan = struct {
+    full_path: []const u8,
+    directory: bool,
+    dry_run: bool,
+
+    fn deinit(self: *RemovalPlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.full_path);
+        self.* = undefined;
+    }
+};
 
 pub fn deinitPlans(allocator: std.mem.Allocator, plans: []RemovalPlan) void {
     for (plans) |*removal| removal.deinit(allocator);
     allocator.free(plans);
 }
 
-/// Only scan package checkout roots. Build trees, sources, and other Shelly
-/// caches are not package archives and must remain available after purify.
+fn validateRoot(root: []const u8) !void {
+    if (!std.fs.path.isAbsolute(root)) return error.InvalidCacheRoot;
+    var components = std.mem.tokenizeScalar(u8, root, '/');
+    var count: usize = 0;
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, ".."))
+            return error.InvalidCacheRoot;
+        count += 1;
+    }
+    if (count == 0) return error.InvalidCacheRoot;
+}
+
+/// Preview immediate entries without traversing build trees or following links.
+/// The root itself remains available for subsequent cache writes.
 pub fn plan(
     context: *runtime.RuntimeContext,
     operation_context: *PackageManager.OperationContext,
     root: []const u8,
     dry_run: bool,
 ) ![]RemovalPlan {
-    if (!std.fs.path.isAbsolute(root)) return error.InvalidCacheRoot;
-    var directory = std.Io.Dir.cwd().openDir(context.io, root, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
+    try validateRoot(root);
+    if (operation_context.isCancelled()) return error.Cancelled;
+    // A trailing slash must not turn a symlink into a followed directory.
+    const root_path = std.mem.trimEnd(u8, root, "/");
+    var directory = std.Io.Dir.cwd().openDir(context.io, root_path, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return context.allocator.alloc(RemovalPlan, 0),
         else => return err,
     };
@@ -30,29 +56,21 @@ pub fn plan(
     var iterator = directory.iterate();
     while (try iterator.next(context.io)) |entry| {
         if (operation_context.isCancelled()) return error.Cancelled;
-        if (entry.kind != .directory) continue;
-        var checkout = try directory.openDir(context.io, entry.name, .{ .follow_symlinks = false });
-        defer checkout.close(context.io);
-        const pkgbuild = checkout.statFile(context.io, "PKGBUILD", .{ .follow_symlinks = false }) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => return err,
-        };
-        if (pkgbuild.kind != .file) continue;
-        const path = try std.fs.path.join(context.allocator, &.{ root, entry.name });
-        defer context.allocator.free(path);
-        var cleaner = PackageManager.CacheManager.init(context.allocator, context.io, .{ .cache_directory = path });
-        cleaner.setOperationContext(operation_context);
-        var removal = try cleaner.plan_cache_cleanup(.{ .keep = 0, .dry_run = dry_run });
-        errdefer removal.deinit(context.allocator);
-        if (removal.items.len == 0) {
-            removal.deinit(context.allocator);
-            continue;
-        }
-        try plans.append(context.allocator, removal);
+        const kind = if (entry.kind == .unknown)
+            (try directory.statFile(context.io, entry.name, .{ .follow_symlinks = false })).kind
+        else
+            entry.kind;
+        const path = try std.fs.path.join(context.allocator, &.{ root_path, entry.name });
+        errdefer context.allocator.free(path);
+        try plans.append(context.allocator, .{
+            .full_path = path,
+            .directory = kind == .directory,
+            .dry_run = dry_run,
+        });
     }
     std.mem.sort(RemovalPlan, plans.items, {}, struct {
         fn lessThan(_: void, a: RemovalPlan, b: RemovalPlan) bool {
-            return std.mem.lessThan(u8, a.cache_directory, b.cache_directory);
+            return std.mem.lessThan(u8, a.full_path, b.full_path);
         }
     }.lessThan);
     return plans.toOwnedSlice(context.allocator);
@@ -63,92 +81,95 @@ pub fn execute(
     operation_context: *PackageManager.OperationContext,
     plans: []const RemovalPlan,
 ) !void {
-    for (plans) |*removal| {
-        if (operation_context.isCancelled()) return error.Cancelled;
+    var operation = operation_context.begin(.{ .backend = .aur, .kind = .cleanup });
+    var completion: PackageManager.OperationCompletionStatus = .failed;
+    defer operation.finish(completion);
+    for (plans, 0..) |removal, index| {
+        if (operation.isCancelled()) return error.Cancelled;
         if (removal.dry_run) continue;
-        const root_path = std.fs.path.dirname(removal.cache_directory) orelse return error.InvalidCacheRoot;
-        var root = try std.Io.Dir.cwd().openDir(context.io, root_path, .{ .follow_symlinks = false });
+        const root_path = std.fs.path.dirname(removal.full_path) orelse return error.InvalidCacheRoot;
+        try validateRoot(root_path);
+        var root = std.Io.Dir.cwd().openDir(context.io, root_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
         defer root.close(context.io);
-        // Keep deletion relative to an open checkout handle. Replacing the root
-        // or checkout with a symlink cannot redirect removal to another tree.
-        var directory = try root.openDir(context.io, std.fs.path.basename(removal.cache_directory), .{ .follow_symlinks = false });
-        defer directory.close(context.io);
-        var operation = operation_context.begin(.{ .backend = .aur, .kind = .cleanup });
-        var completion: PackageManager.OperationCompletionStatus = .failed;
-        defer operation.finish(completion);
-        for (removal.items, 0..) |item, index| {
-            if (operation.isCancelled()) return error.Cancelled;
-            try deletePlannedFile(context.io, directory, item.package.full_path);
-            if (item.signature_path) |signature| try deletePlannedFile(context.io, directory, signature);
-            operation.progress(.{
-                .stage = "cache-clean",
-                .completed = @intCast(index + 1),
-                .total = @intCast(removal.items.len),
-                .message = "AUR package-cache",
-            });
+        // deleteTree walks relative to directory handles and never follows
+        // symlinks, including a directory replaced by a link after preview.
+        const name = std.fs.path.basename(removal.full_path);
+        if (removal.directory) {
+            try root.deleteTree(context.io, name);
+        } else {
+            root.deleteFile(context.io, name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
         }
-        completion = .success;
+        operation.progress(.{
+            .stage = "cache-clean",
+            .completed = @intCast(index + 1),
+            .total = @intCast(plans.len),
+            .message = "AUR cache",
+        });
     }
+    completion = .success;
 }
 
-fn deletePlannedFile(io: std.Io, directory: std.Io.Dir, path: []const u8) !void {
-    directory.deleteFile(io, std.fs.path.basename(path)) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
-}
-
-test "AUR cleanup removes all planned archives and signatures but preserves checkout contents" {
+test "AUR cleanup clears all cache contents and preserves the root and external symlink targets" {
     const test_support = @import("test_support.zig");
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var absolute_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const absolute_length = try temporary.dir.realPath(std.testing.io, &absolute_buffer);
-    const root = absolute_buffer[0..absolute_length];
-    const preserved = [_][]const u8{
+    const removed = [_][]const u8{
         "first/PKGBUILD",
         "first/.git/config",
         "first/src/source.tar.gz",
         "first/pkg/example/usr/bin/example",
         "first/PreviousVersions/PKGBUILD.1",
-        "second/PKGBUILD",
-        "unrelated/example-1-1-any.pkg.tar.zst",
-    };
-    const removed = [_][]const u8{
         "first/example-1-1-any.pkg.tar.zst",
         "first/example-1-1-any.pkg.tar.zst.sig",
-        "first/example-2-1-any.pkg.tar.xz",
-        "second/example-debug-2-1-any.pkg.tar.zst",
+        "zoom/zoom-7.2.1.5760_orig_x86_64.pkg.tar.xz",
+        "no-pkgbuild/source.zip",
+        "db/sync/example.db",
+        "loose-file",
+        ".hidden",
     };
-    for (preserved ++ removed) |path| {
-        try temporary.dir.createDirPath(std.testing.io, std.fs.path.dirname(path).?);
-        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "fixture" });
+    for (removed) |path| {
+        const sub_path = try std.fs.path.join(std.testing.allocator, &.{ "cache", path });
+        defer std.testing.allocator.free(sub_path);
+        try temporary.dir.createDirPath(std.testing.io, std.fs.path.dirname(sub_path).?);
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = "fixture" });
     }
-    // A symlinked checkout must not duplicate or broaden the plan.
-    try temporary.dir.symLink(std.testing.io, "first", "linked", .{ .is_directory = true });
+    try temporary.dir.createDirPath(std.testing.io, "cache/empty");
+    try temporary.dir.createDirPath(std.testing.io, "outside");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "outside/keep", .data = "preserved" });
+    try temporary.dir.symLink(std.testing.io, "../outside", "cache/linked", .{ .is_directory = true });
+    try temporary.dir.symLink(std.testing.io, "../../outside", "cache/first/linked", .{ .is_directory = true });
+    try temporary.dir.symLink(std.testing.io, "missing", "cache/dangling", .{});
     var tc: test_support.TestContext = .{};
     tc.init();
     defer tc.deinit();
     var operation_context = PackageManager.OperationContext.init(tc.context.allocator, tc.context.io);
     defer operation_context.deinit();
+    const root = try std.fs.path.join(tc.context.allocator, &.{ absolute_buffer[0..absolute_length], "cache" });
     const dry_plans = try plan(&tc.context, &operation_context, root, true);
     defer deinitPlans(tc.context.allocator, dry_plans);
-    try std.testing.expectEqual(@as(usize, 2), dry_plans.len);
-    try std.testing.expectEqual(@as(usize, 2), dry_plans[0].items.len);
-    try std.testing.expectEqual(@as(usize, 1), dry_plans[1].items.len);
+    try std.testing.expectEqual(@as(usize, 9), dry_plans.len);
     try execute(&tc.context, &operation_context, dry_plans);
-    for (removed) |path| _ = try temporary.dir.statFile(std.testing.io, path, .{});
+    for (dry_plans) |entry| _ = try std.Io.Dir.cwd().statFile(std.testing.io, entry.full_path, .{ .follow_symlinks = false });
 
     const plans = try plan(&tc.context, &operation_context, root, false);
     defer deinitPlans(tc.context.allocator, plans);
-    // Files created after the preview must not be swept into execution.
-    const later = "first/example-3-1-any.pkg.tar.zst";
-    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = later, .data = "new archive" });
     try execute(&tc.context, &operation_context, plans);
-    for (removed) |path|
-        try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, path, .{}));
-    for (preserved) |path| _ = try temporary.dir.statFile(std.testing.io, path, .{});
-    _ = try temporary.dir.statFile(std.testing.io, later, .{});
+    // Missing targets are harmless if execution is repeated.
+    try execute(&tc.context, &operation_context, plans);
+    var remaining = try temporary.dir.openDir(std.testing.io, "cache", .{ .iterate = true });
+    defer remaining.close(std.testing.io);
+    var iterator = remaining.iterate();
+    try std.testing.expectEqual(null, try iterator.next(std.testing.io));
+    const contents = try temporary.dir.readFileAlloc(std.testing.io, "outside/keep", tc.context.allocator, .limited(1024));
+    try std.testing.expectEqualStrings("preserved", contents);
 }
 
 test "missing AUR cache is empty and cancellation stops planning" {
@@ -171,7 +192,7 @@ test "missing AUR cache is empty and cancellation stops planning" {
     try std.testing.expectError(error.Cancelled, plan(&tc.context, &operation_context, absolute_buffer[0..absolute_length], false));
 }
 
-test "AUR cleanup refuses a checkout replaced by a symlink after preview" {
+test "AUR cleanup unlinks a checkout replaced by a symlink without following it" {
     const test_support = @import("test_support.zig");
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -194,9 +215,98 @@ test "AUR cleanup refuses a checkout replaced by a symlink after preview" {
     try std.testing.expectEqual(@as(usize, 1), plans.len);
     try temporary.dir.deleteTree(std.testing.io, "cache/example");
     try temporary.dir.symLink(std.testing.io, "../outside", "cache/example", .{ .is_directory = true });
-    if (execute(&tc.context, &operation_context, plans)) |_| {
-        return error.ExpectedSymlinkRejection;
-    } else |_| {}
+    try execute(&tc.context, &operation_context, plans);
+    try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "cache/example", .{ .follow_symlinks = false }));
     const contents = try temporary.dir.readFileAlloc(std.testing.io, "outside/" ++ archive, tc.context.allocator, .limited(1024));
     try std.testing.expectEqualStrings("preserved", contents);
+}
+
+test "AUR cleanup removes contents added to previewed directories but preserves new top-level entries" {
+    const test_support = @import("test_support.zig");
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var absolute_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const absolute_length = try temporary.dir.realPath(std.testing.io, &absolute_buffer);
+    try temporary.dir.createDirPath(std.testing.io, "example");
+    var tc: test_support.TestContext = .{};
+    tc.init();
+    defer tc.deinit();
+    var operations = PackageManager.OperationContext.init(tc.context.allocator, tc.context.io);
+    defer operations.deinit();
+    const plans = try plan(&tc.context, &operations, absolute_buffer[0..absolute_length], false);
+    defer deinitPlans(tc.context.allocator, plans);
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "example/new-source", .data = "included" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "new-entry", .data = "not previewed" });
+    operations.cancel();
+    try std.testing.expectError(error.Cancelled, execute(&tc.context, &operations, plans));
+    _ = try temporary.dir.statFile(std.testing.io, "example/new-source", .{});
+    var active = PackageManager.OperationContext.init(tc.context.allocator, tc.context.io);
+    defer active.deinit();
+    try execute(&tc.context, &active, plans);
+    try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "example", .{}));
+    _ = try temporary.dir.statFile(std.testing.io, "new-entry", .{});
+}
+
+test "AUR cleanup rejects invalid roots and a cache root replaced by a symlink" {
+    const test_support = @import("test_support.zig");
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var absolute_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const absolute_length = try temporary.dir.realPath(std.testing.io, &absolute_buffer);
+    try temporary.dir.createDirPath(std.testing.io, "cache");
+    try temporary.dir.createDirPath(std.testing.io, "outside");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "cache/keep", .data = "cached" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "outside/keep", .data = "preserved" });
+    var tc: test_support.TestContext = .{};
+    tc.init();
+    defer tc.deinit();
+    var operations = PackageManager.OperationContext.init(tc.context.allocator, tc.context.io);
+    defer operations.deinit();
+    for ([_][]const u8{ "", "relative", "/", "///", "/tmp/..", "/tmp/." }) |invalid|
+        try std.testing.expectError(error.InvalidCacheRoot, plan(&tc.context, &operations, invalid, false));
+    const root = try std.fs.path.join(tc.context.allocator, &.{ absolute_buffer[0..absolute_length], "cache" });
+    const plans = try plan(&tc.context, &operations, root, false);
+    defer deinitPlans(tc.context.allocator, plans);
+    try temporary.dir.deleteTree(std.testing.io, "cache");
+    try temporary.dir.symLink(std.testing.io, "outside", "cache", .{ .is_directory = true });
+    if (execute(&tc.context, &operations, plans)) |_| return error.ExpectedSymlinkRejection else |_| {}
+    if (plan(&tc.context, &operations, root, false)) |unexpected| {
+        deinitPlans(tc.context.allocator, unexpected);
+        return error.ExpectedSymlinkRejection;
+    } else |_| {}
+    const trailing_root = try std.fmt.allocPrint(tc.context.allocator, "{s}/", .{root});
+    if (plan(&tc.context, &operations, trailing_root, false)) |unexpected| {
+        deinitPlans(tc.context.allocator, unexpected);
+        return error.ExpectedSymlinkRejection;
+    } else |_| {}
+    const contents = try temporary.dir.readFileAlloc(std.testing.io, "outside/keep", tc.context.allocator, .limited(1024));
+    try std.testing.expectEqualStrings("preserved", contents);
+}
+
+test "AUR cleanup reports permission failures without silently keeping build trees" {
+    const test_support = @import("test_support.zig");
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var absolute_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const absolute_length = try temporary.dir.realPath(std.testing.io, &absolute_buffer);
+    try temporary.dir.createDirPath(std.testing.io, "pkg");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "pkg/source", .data = "fixture" });
+    var tc: test_support.TestContext = .{};
+    tc.init();
+    defer tc.deinit();
+    var operations = PackageManager.OperationContext.init(tc.context.allocator, tc.context.io);
+    defer operations.deinit();
+    const plans = try plan(&tc.context, &operations, absolute_buffer[0..absolute_length], false);
+    defer deinitPlans(tc.context.allocator, plans);
+    try temporary.dir.setFilePermissions(std.testing.io, "pkg", .fromMode(0), .{});
+    defer temporary.dir.setFilePermissions(std.testing.io, "pkg", .fromMode(0o700), .{}) catch {};
+    // A privileged test runner can read mode-000 directories, just as the CLI can.
+    if (temporary.dir.openDir(std.testing.io, "pkg", .{ .iterate = true })) |opened| {
+        opened.close(std.testing.io);
+        return error.SkipZigTest;
+    } else |_| {}
+    if (execute(&tc.context, &operations, plans)) |_| return error.ExpectedPermissionFailure else |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => {},
+        else => return err,
+    }
 }

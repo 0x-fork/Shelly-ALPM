@@ -90,6 +90,19 @@ Shelly suggests `shelly -Is <package>`. Explicit local builds with
 `shelly build /path/to/PKGBUILD` and removal of installed packages remain
 available without an AUR availability check.
 
+To build an AUR package in a fresh native build root before installing it:
+
+```bash
+shelly -Ia --isolated <package>
+```
+
+Repository build dependencies stay in the guest; the exported package and its
+runtime dependencies are installed on the host. This also supports `--needed`
+and `--version`. As with `shelly build --isolated`, AUR-only build dependencies
+and package signing are not yet supported. `--isolated` cannot be combined with
+`--chroot` or dependency-only installation. See [isolated builds](docs/isolated-builds.md)
+for requirements and limitations.
+
 ## PKGBUILD review
 
 Terminal PKGBUILD reviews show changed lines with three unchanged lines of
@@ -152,8 +165,8 @@ cleanup behavior with `shelly config set DisableCacheClean false`.
 Standalone `shelly upgrade standard` keeps its existing cleanup behavior.
 You can still clean the cache manually with `shelly purify standard --cache`.
 
-Add `--aur-cache` to also delete **all** built AUR package archives and their
-matching signatures from the invoking user's `$XDG_CACHE_HOME/Shelly` cache
+Add `--aur-cache` to also delete **everything inside** the invoking user's
+`$XDG_CACHE_HOME/Shelly` cache
 (default: `~/.cache/Shelly`):
 
 ```bash
@@ -161,11 +174,18 @@ shelly purify standard --cache --aur-cache --dry-run
 shelly purify standard --cache --aur-cache
 ```
 
-The command previews the files and asks for confirmation before deleting them.
+The command previews each cache entry and asks for confirmation before deleting
+it. Previewed directories are removed with all their contents, including AUR
+PKGBUILDs, checkout history, sources, build trees, package archives, and metadata.
+This also removes caches for packages that are no longer installed. The cache
+root directory is retained; symlinks are removed without following their targets.
+Files outside Shelly's cache are not included.
+
 `--aur-cache` can also be used without `--cache`; standard purify still checks
-for corrupted archives. AUR PKGBUILDs, checkout history, source files, and build
-directories are retained. Archives in custom build output destinations outside
-Shelly's cache are not included.
+for corrupted archives. The `--cache` retention count applies only to repository
+package archives, not to Shelly's cache. The UI's **Clean Package Cache** action
+performs both operations and clears the entire Shelly cache regardless of the
+selected repository retention count.
 
 ## Roadmap
 
@@ -307,6 +327,12 @@ front: the build itself runs as your regular user, and the elevated
 coordinator installs the built archives after the build completes. Like
 `makepkg -i`, the install transaction adds only the built archives, so
 combine it with `--sync-deps` when the package's dependencies may be missing.
+
+Choose package compression with `shelly build --compression-level 3` (also
+supported with `--isolated`). Presets 1–5 range from conservative resource use
+to maximum compression effort. Set `package.compression_level` in
+`shellybuild.conf` for a persistent preference; omission preserves library
+defaults. See the [preset mappings and tradeoffs](docs/shellybuild.conf.md#package-compression).
 
 Versioned JSON contracts for unattended package-building services are
 available. Probe an installed binary with `shelly --version --json` before

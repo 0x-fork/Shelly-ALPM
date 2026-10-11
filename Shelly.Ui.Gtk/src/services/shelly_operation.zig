@@ -11,6 +11,23 @@ const runtime = @import("runtime.zig");
 const log = std.log.scoped(.shelly_operation);
 const proxy_environment_marker = "--proxy-environment-stdin";
 
+// Resolve before pkexec sanitizes XDG_CACHE_HOME and HOME.
+fn purifyCacheRoot(allocator: std.mem.Allocator, args: []const []const u8, environment: *const std.process.Environ.Map) !?[]u8 {
+    if (args.len < 2 or !std.mem.eql(u8, args[0], "purify") or !std.mem.eql(u8, args[1], "standard")) return null;
+    var enabled = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--aur-cache-root")) return null;
+        if (std.mem.eql(u8, arg, "--aur-cache")) enabled = true;
+    }
+    if (!enabled) return null;
+    if (environment.get("XDG_CACHE_HOME")) |cache| {
+        if (std.fs.path.isAbsolute(cache)) return try std.fs.path.join(allocator, &.{ cache, "Shelly" });
+    }
+    const home = environment.get("HOME") orelse return error.HomeNotSet;
+    if (!std.fs.path.isAbsolute(home)) return error.HomeNotSet;
+    return try std.fs.path.join(allocator, &.{ home, ".cache", "Shelly" });
+}
+
 const ProxyEnvironmentFrame = struct {
     @"$kind": []const u8 = "proxy.environment",
     http_proxy: ?[]const u8 = null,
@@ -387,6 +404,7 @@ pub const ShellyCommands = struct {
         try argv.append(alloc, "standard");
         try argv.append(alloc, "--cache");
         try argv.append(alloc, keep_str);
+        try argv.append(alloc, "--aur-cache");
         return argv.toOwnedSlice(alloc);
     }
 
@@ -485,27 +503,33 @@ pub const ShellyOperation = struct {
         };
     }
 
-    fn build_full_argv(self: *ShellyOperation, args: []const []const u8) ![]const []const u8 {
+    fn build_full_argv(self: *ShellyOperation, args: []const []const u8, cache_root: ?[]const u8) ![]const []const u8 {
         const shelly_bin = if (builtin.mode == .Debug)
             "../Shelly.Cli.Zig/zig-out/bin/shelly"
         else
             "shelly";
-        var full = try self.allocator.alloc([]const u8, args.len + 2);
+        var full = try self.allocator.alloc([]const u8, args.len + 2 + @as(usize, if (cache_root != null) 2 else 0));
         full[0] = shelly_bin;
         @memcpy(full[1 .. 1 + args.len], args);
+        if (cache_root) |root| {
+            full[1 + args.len] = "--aur-cache-root";
+            full[2 + args.len] = root;
+        }
         full[full.len - 1] = "--ui-mode";
 
         return full;
     }
 
     pub fn start(self: *ShellyOperation, args: []const []const u8) !void {
-        const full = try self.build_full_argv(args);
+        const full = try self.build_full_argv(args, null);
         defer self.allocator.free(full);
         try self.spawn_and_read(full, null);
     }
 
     pub fn startPrivileged(self: *ShellyOperation, args: []const []const u8) !void {
-        const full = try self.build_full_argv(args);
+        const cache_root = try purifyCacheRoot(self.allocator, args, runtime.environ_map);
+        defer if (cache_root) |root| self.allocator.free(root);
+        const full = try self.build_full_argv(args, cache_root);
         defer self.allocator.free(full);
         const proxy_environment = try serializeProxyEnvironment(self.allocator, runtime.environ_map);
         defer if (proxy_environment) |json| self.allocator.free(json);
@@ -877,12 +901,6 @@ fn parseSelection(op: *ShellyOperation, json: []const u8, kind: []const u8) !?*P
             .prompt = qa.dupe(u8, e.value.QuestionText) catch "",
             .options = opts,
         } };
-    } else if (std.mem.eql(u8, kind, "q.provider")) {
-        pending.request = .{ .select_one = .{
-            .question_id = qid,
-            .prompt = qa.dupe(u8, e.value.QuestionText) catch "",
-            .options = opts,
-        } };
     } else {
         pending.request = .{ .select_one = .{
             .question_id = qid,
@@ -1028,4 +1046,31 @@ test "proxy environment serialization is absent without proxy variables" {
     defer environment.deinit();
     try environment.put("PATH", "/usr/bin");
     try std.testing.expect(try serializeProxyEnvironment(std.testing.allocator, &environment) == null);
+}
+
+test "clean cache argv includes the entire AUR cache regardless of repository retention" {
+    for ([_][]const u8{ "0", "3" }) |keep| {
+        const argv = try ShellyCommands.clean_cache(std.testing.allocator, keep);
+        defer std.testing.allocator.free(argv);
+        try std.testing.expectEqualSlices([]const u8, &.{ "purify", "standard", "--cache", keep, "--aur-cache" }, argv);
+    }
+}
+
+test "clean cache argv preserves the caller cache before privileged launch" {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", "/home/tester");
+    for ([_][]const u8{ "/tmp/custom cache", "relative", "" }) |cache| {
+        try environment.put("XDG_CACHE_HOME", cache);
+        const root = (try purifyCacheRoot(std.testing.allocator, &.{ "purify", "standard", "--aur-cache" }, &environment)).?;
+        defer std.testing.allocator.free(root);
+        try std.testing.expectEqualStrings(if (std.fs.path.isAbsolute(cache)) "/tmp/custom cache/Shelly" else "/home/tester/.cache/Shelly", root);
+        var operation: ShellyOperation = undefined;
+        operation.allocator = std.testing.allocator;
+        const argv = try operation.build_full_argv(&.{ "purify", "standard", "--aur-cache" }, root);
+        defer std.testing.allocator.free(argv);
+        try std.testing.expectEqualSlices([]const u8, &.{ "purify", "standard", "--aur-cache", "--aur-cache-root", root, "--ui-mode" }, argv[1..]);
+    }
+    try std.testing.expectEqual(null, try purifyCacheRoot(std.testing.allocator, &.{ "purify", "standard", "--cache", "0" }, &environment));
+    try std.testing.expectEqual(null, try purifyCacheRoot(std.testing.allocator, &.{ "purify", "standard", "--aur-cache", "--aur-cache-root", "/tmp/explicit/Shelly" }, &environment));
 }
