@@ -1,5 +1,5 @@
 const std = @import("std");
-const options = @import("options");
+const features = @import("build_features.zig");
 const ShellyCli = @import("shelly_cli.zig").ShellyCli;
 
 pub const Feature = enum {
@@ -18,7 +18,7 @@ pub fn dependenciesForFeature(feature: Feature) []const []const u8 {
 }
 
 pub fn flatpakBackendPackage() []const u8 {
-    return options.flatpak_backend_package;
+    return features.flatpak_backend_package;
 }
 
 pub fn selectedDependencies(
@@ -87,7 +87,7 @@ test "selected support dependencies include only requested features" {
 
 test "Flatpak backend remains a separate configured package" {
     try std.testing.expectEqualStrings(
-        options.flatpak_backend_package,
+        features.flatpak_backend_package,
         flatpakBackendPackage(),
     );
 }

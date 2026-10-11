@@ -165,8 +165,8 @@ cleanup behavior with `shelly config set DisableCacheClean false`.
 Standalone `shelly upgrade standard` keeps its existing cleanup behavior.
 You can still clean the cache manually with `shelly purify standard --cache`.
 
-Add `--aur-cache` to also delete **all** built AUR package archives and their
-matching signatures from the invoking user's `$XDG_CACHE_HOME/Shelly` cache
+Add `--aur-cache` to also delete **everything inside** the invoking user's
+`$XDG_CACHE_HOME/Shelly` cache
 (default: `~/.cache/Shelly`):
 
 ```bash
@@ -174,11 +174,18 @@ shelly purify standard --cache --aur-cache --dry-run
 shelly purify standard --cache --aur-cache
 ```
 
-The command previews the files and asks for confirmation before deleting them.
+The command previews each cache entry and asks for confirmation before deleting
+it. Previewed directories are removed with all their contents, including AUR
+PKGBUILDs, checkout history, sources, build trees, package archives, and metadata.
+This also removes caches for packages that are no longer installed. The cache
+root directory is retained; symlinks are removed without following their targets.
+Files outside Shelly's cache are not included.
+
 `--aur-cache` can also be used without `--cache`; standard purify still checks
-for corrupted archives. AUR PKGBUILDs, checkout history, source files, and build
-directories are retained. Archives in custom build output destinations outside
-Shelly's cache are not included.
+for corrupted archives. The `--cache` retention count applies only to repository
+package archives, not to Shelly's cache. The UI's **Clean Package Cache** action
+performs both operations and clears the entire Shelly cache regardless of the
+selected repository retention count.
 
 ## Roadmap
 
