@@ -796,7 +796,11 @@ pub fn writeCompressedFixture(allocator: std.mem.Allocator, path: []const u8, co
     return writeFixtureWithFormat(allocator, path, compression, .raw, &.{.{ .path = "embedded-name", .contents = contents }});
 }
 
-const FixtureFormat = enum { pax, zip, raw };
+pub fn writeIsoFixture(allocator: std.mem.Allocator, path: []const u8, entries: []const FixtureEntry) !void {
+    return writeFixtureWithFormat(allocator, path, .none, .iso9660, entries);
+}
+
+const FixtureFormat = enum { pax, zip, raw, iso9660 };
 
 fn writeFixtureWithFormat(
     allocator: std.mem.Allocator,
@@ -831,6 +835,7 @@ fn writeFixtureWithFormat(
             c.archive_write_set_format_pax_restricted(handle),
         .zip => c.archive_write_set_format_zip(handle),
         .raw => c.archive_write_set_format_raw(handle),
+        .iso9660 => c.archive_write_set_format_iso9660(handle),
     };
     if (format_status < c.ARCHIVE_WARN)
         return Error.ArchiveWriteFailed;

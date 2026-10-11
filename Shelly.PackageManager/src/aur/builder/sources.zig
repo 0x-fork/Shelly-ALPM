@@ -147,6 +147,8 @@ pub fn prepareSources(self: *PackageBuilder, operation: *op_context.Operation) !
         steps.reportUnwritableBuildDirectory(self, extraction_staging);
         return error.BuildDirectoryNotWritable;
     };
+    var extracted_files: ExtractedSourceFiles = .{ .sources = prepared };
+    defer extracted_files.deinit(self.allocator);
     for (prepared) |*source| {
         try operation.checkCancelled();
         const materialized = try std.fs.path.join(
@@ -154,6 +156,7 @@ pub fn prepareSources(self: *PackageBuilder, operation: *op_context.Operation) !
             &.{ extraction_staging, source.source.name },
         );
         defer self.allocator.free(materialized);
+        try rejectExistingDestination(self.io, materialized);
         if (source.source.kind == .git) {
             try materializeGitSource(self, operation, source.source, source.destination, materialized);
         } else {
@@ -170,22 +173,17 @@ pub fn prepareSources(self: *PackageBuilder, operation: *op_context.Operation) !
             // renamed source may have the same name as the archive's root
             // directory; in that case the extracted entry owns the path and
             // the raw archive must not overwrite it.
-            _ = std.Io.Dir.cwd().statFile(self.io, materialized, .{ .follow_symlinks = false }) catch |err| switch (err) {
-                error.FileNotFound => {
-                    const extracted = try extractSourceArchiveIfRecognized(
-                        self,
-                        operation,
-                        source.destination,
-                        extraction_staging,
-                    );
-                    if (!extracted) try decompressStandaloneSource(self, operation, source, prepared, extraction_staging);
-                    if (!extracted or !pathExistsNoFollow(self.io, materialized))
-                        try std.Io.Dir.copyFile(.cwd(), source.destination, .cwd(), materialized, self.io, .{});
-                    continue;
-                },
-                else => return err,
-            };
-            return error.UnsafeSourceArchivePath;
+            const extracted = try extractSourceArchiveIfRecognized(
+                self,
+                operation,
+                source.destination,
+                extraction_staging,
+                source.index,
+                &extracted_files,
+            );
+            if (!extracted) try decompressStandaloneSource(self, operation, source, &extracted_files, extraction_staging);
+            if (!extracted or !pathExistsNoFollow(self.io, materialized))
+                try std.Io.Dir.copyFile(.cwd(), source.destination, .cwd(), materialized, self.io, .{});
         }
     }
     // Only a fully prepared staging tree is committed. Sources are
@@ -713,17 +711,14 @@ fn decompressStandaloneSource(
     self: *PackageBuilder,
     operation: *op_context.Operation,
     source: *const source_spec.PreparedSource,
-    prepared: []const source_spec.PreparedSource,
+    extracted_files: *const ExtractedSourceFiles,
     destination_root: []const u8,
 ) !void {
     const compression = (try archive.StandaloneCompression.fromFile(self.io, source.destination)) orelse return;
     const output_name = compression.outputName(source.source.name) orelse return;
     const relative = try archive.normalizeEntryPath(self.allocator, output_name);
     defer self.allocator.free(relative);
-    // Reserve source aliases even when they occur later or are in noextract.
-    for (prepared) |other| {
-        if (std.mem.eql(u8, relative, other.source.name)) return error.UnsafeSourceArchivePath;
-    }
+    try extracted_files.checkReservedPath(relative, .regular_file, null);
     const destination = try std.fs.path.join(self.allocator, &.{ destination_root, relative });
     defer self.allocator.free(destination);
     try ensureSafeArchivePath(self, destination_root, relative, false);
@@ -765,6 +760,8 @@ fn extractSourceArchiveIfRecognized(
     operation: *op_context.Operation,
     archive_path: []const u8,
     destination_root: []const u8,
+    source_index: usize,
+    extracted_files: *ExtractedSourceFiles,
 ) !bool {
     const DirectoryTimestamp = struct {
         path: []u8,
@@ -802,9 +799,10 @@ fn extractSourceArchiveIfRecognized(
             }
             const relative = try archive.normalizePosixEntryPath(self.allocator, entry.path);
             defer self.allocator.free(relative);
+            try extracted_files.checkReservedPath(relative, entry.kind, source_index);
             const destination = try std.fs.path.join(self.allocator, &.{ destination_root, relative });
             defer self.allocator.free(destination);
-            const replacing_regular_file = try members.add(self.allocator, relative, entry.kind, entry.link_target);
+            try members.add(self.allocator, relative, entry.kind, entry.link_target);
             switch (entry.kind) {
                 .directory => {
                     try ensureSafeArchivePath(self, destination_root, relative, true);
@@ -819,13 +817,12 @@ fn extractSourceArchiveIfRecognized(
                 },
                 .regular_file => {
                     try ensureSafeArchivePath(self, destination_root, relative, false);
-                    if (replacing_regular_file) {
+                    if (extracted_files.regular_files.contains(relative)) {
                         const stat = try std.Io.Dir.cwd().statFile(self.io, destination, .{ .follow_symlinks = false });
                         if (stat.kind != .file) return error.UnsafeSourceArchivePath;
-                        // Recreate only a regular file from this archive. This
-                        // accepts appended revisions (e.g. fish's Cargo files),
-                        // including read-only originals, and applies the latest
-                        // header's mode without writing through an existing inode.
+                        // Later archive entries replace earlier regular files,
+                        // including read-only originals. Recreate the inode so
+                        // existing hard links retain their original contents.
                         try std.Io.Dir.cwd().deleteFile(self.io, destination);
                     } else {
                         try rejectExistingDestination(self.io, destination);
@@ -850,6 +847,7 @@ fn extractSourceArchiveIfRecognized(
                     if (entry.mtime) |mtime| try output.setTimestamps(self.io, .{
                         .modify_timestamp = .{ .new = mtime },
                     });
+                    try extracted_files.recordRegularFile(self.allocator, relative, source_index);
                 },
                 .symbolic_link => {
                     const target = entry.link_target orelse return error.UnsafeSourceArchiveLink;
@@ -893,6 +891,46 @@ fn extractSourceArchiveIfRecognized(
     return true;
 }
 
+/// Only completed regular archive entries are eligible for replacement. Raw
+/// sources, standalone outputs, Git files, and hard-link destinations never
+/// enter this registry, even when stat() describes them as regular files.
+const ExtractedSourceFiles = struct {
+    sources: []const source_spec.PreparedSource,
+    regular_files: std.StringHashMapUnmanaged(usize) = .empty,
+
+    fn deinit(self: *ExtractedSourceFiles, allocator: std.mem.Allocator) void {
+        var keys = self.regular_files.keyIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        self.regular_files.deinit(allocator);
+    }
+
+    fn recordRegularFile(self: *ExtractedSourceFiles, allocator: std.mem.Allocator, path: []const u8, source_index: usize) !void {
+        if (self.regular_files.getPtr(path)) |origin| {
+            origin.* = source_index;
+            return;
+        }
+        const owned_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned_path);
+        try self.regular_files.putNoClobber(allocator, owned_path, source_index);
+    }
+
+    fn checkReservedPath(self: *const ExtractedSourceFiles, path: []const u8, kind: archive.EntryKind, source_index: ?usize) !void {
+        // Source aliases are single path components. Reserve their entire
+        // subtree before processing any archive, independent of source order.
+        for (self.sources) |source| {
+            const name = source.source.name;
+            const exact = std.mem.eql(u8, path, name);
+            const descendant = path.len > name.len and std.mem.startsWith(u8, path, name) and path[name.len] == '/';
+            if (!exact and !descendant) continue;
+            // An extensionless archive may own its matching root directory;
+            // its raw payload is then kept only in the acquisition staging tree.
+            if (source_index != null and source.index == source_index.? and
+                source.source.kind != .git and (descendant or kind == .directory)) continue;
+            return error.UnsafeSourceArchivePath;
+        }
+    }
+};
+
 const SourceArchiveMembers = struct {
     const Member = struct {
         kind: archive.EntryKind,
@@ -910,12 +948,11 @@ const SourceArchiveMembers = struct {
         self.entries.deinit(allocator);
     }
 
-    /// Returns true only for a repeated regular file within this archive.
-    fn add(self: *SourceArchiveMembers, allocator: std.mem.Allocator, path: []const u8, kind: archive.EntryKind, link_target: ?[]const u8) !bool {
+    fn add(self: *SourceArchiveMembers, allocator: std.mem.Allocator, path: []const u8, kind: archive.EntryKind, link_target: ?[]const u8) !void {
         if (self.entries.getIndex(path)) |index| {
             const previous_kind = self.entries.values()[index].kind;
-            if (kind == .directory and previous_kind == .directory) return false;
-            if (kind == .regular_file and previous_kind == .regular_file) return true;
+            if (kind == .directory and previous_kind == .directory) return;
+            if (kind == .regular_file and previous_kind == .regular_file) return;
             return error.UnsafeSourceArchivePath;
         }
         var parent = std.fs.path.dirname(path);
@@ -933,7 +970,6 @@ const SourceArchiveMembers = struct {
             null;
         errdefer if (target) |value| allocator.free(value);
         try self.entries.putNoClobber(allocator, owned_path, .{ .kind = kind, .target = target });
-        return false;
     }
 
     fn resolve(self: *SourceArchiveMembers, builder: *PackageBuilder, operation: *op_context.Operation, archive_path: []const u8, root: []const u8) !void {
