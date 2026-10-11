@@ -2,8 +2,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: shelly-ui 2.2.4.1\n"
 "Report-Msgid-Bugs-To: csnyder@seafoam-labs.org\n"
-"POT-Creation-Date: 2026-10-07 08:21+0300\n"
-"PO-Revision-Date: 2026-10-10 06:32+0000\n"
+"POT-Creation-Date: 2026-10-10 05:38+0300\n"
+"PO-Revision-Date: 2026-10-11 13:16+0000\n"
 "Last-Translator: juliazero <juliazero2@gmail.com>\n"
 "Language-Team: Polish\n"
 "Language: pl\n"
@@ -61,6 +61,12 @@ msgstr "Dane aplikacji zostaną trwale usunięte."
 
 msgid "Confirm"
 msgstr "Potwierdź"
+
+msgid "Permissions unavailable"
+msgstr "Uprawnienia niedostępne"
+
+msgid "Shelly could not read the permissions for this app."
+msgstr "Shelly nie może odczytać uprawnień tej aplikacji."
 
 msgid "No special permissions requested"
 msgstr "Nie zażądano specjalnych uprawnień"
@@ -832,20 +838,29 @@ msgstr "Dalej"
 msgid "Start Shelly"
 msgstr "Uruchom Shelly"
 
-msgid "Filesystem"
-msgstr "System plików"
+msgid "System files"
+msgstr "Systemowe pliki"
+
+msgid "Other folders"
+msgstr "Inne foldery"
+
+msgid "Running services"
+msgstr "Uruchomione usługi"
+
+msgid "Other apps' data"
+msgstr "Dane innych aplikacji"
+
+msgid "Home folder"
+msgstr "Folder domowy"
+
+msgid "User folders"
+msgstr "Foldery użytkownika"
+
+msgid "Persistent files"
+msgstr "Trwałe pliki"
 
 msgid "Devices"
 msgstr "Urządzenia"
-
-msgid "Sockets"
-msgstr "Gniazda (Sockets)"
-
-msgid "Shared"
-msgstr "Współdzielone"
-
-msgid "Environment"
-msgstr "Środowisko"
 
 msgid "Session bus"
 msgstr "Magistrala sesji (D-Bus)"
@@ -853,8 +868,38 @@ msgstr "Magistrala sesji (D-Bus)"
 msgid "System bus"
 msgstr "Magistrala systemowa (D-Bus)"
 
+msgid "Network access"
+msgstr "Dostęp do sieci"
+
+msgid "Display server"
+msgstr "Serwer wyświetlania"
+
+msgid "Sandbox features"
+msgstr "Funkcje piaskownicy"
+
+msgid "Environment"
+msgstr "Środowisko"
+
+msgid "Sound"
+msgstr "Dźwięk"
+
+msgid "Printing"
+msgstr "Drukowanie"
+
+msgid "Inter-process communication"
+msgstr "Komunikacja międzyprocesowa"
+
 msgid "Other"
 msgstr "Inne"
+
+msgid "No network access"
+msgstr "Brak dostępu do sieci"
+
+msgid "No device access"
+msgstr "Brak dostępu do urządzenia"
+
+msgid "No access to system files"
+msgstr "Brak dostępu do plików systemowych"
 
 msgid "Review PKGBUILD changes for"
 msgstr "Przejrzyj zmiany w PKGBUILD dla"
