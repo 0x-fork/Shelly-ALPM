@@ -72,6 +72,14 @@ pub fn build(b: *std.Build) void {
     b.step("appimage-test", "Test AppImage command routing and metadata synchronization")
         .dependOn(&b.addRunArtifact(appimage_tests).step);
 
+    const purify_tests = b.addTest(.{
+        .name = "purify-test",
+        .root_module = cli,
+        .filters = &.{ "purify", "AUR cleanup", "AUR cache" },
+    });
+    b.step("purify-test", "Test purify planning, confirmation, and cache removal")
+        .dependOn(&b.addRunArtifact(purify_tests).step);
+
     const module_tests = b.addTest(.{
         .root_module = cli,
     });
