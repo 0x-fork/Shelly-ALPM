@@ -25,7 +25,7 @@ const VersionHistoryDialog = @import("../dialog/page/version_history.zig").Versi
 const HistoryEntry = @import("../dialog/page/version_history.zig").Entry;
 const AurWarningDialog = @import("../dialog/page/aur_warning.zig").AurWarningDialog;
 const translations = @import("../helpers/translations.zig");
-const options = @import("options");
+const features = @import("../services/build_features.zig");
 
 pub const SettingsPage = ShellySettingsPage;
 
@@ -189,6 +189,8 @@ pub const ShellySettingsPage = extern struct {
             self,
             .{ .detail = "active" },
         );
+        hideUnbuiltRows(p);
+
         _ = gobject.Object.signals.notify.connect(
             p.aur_switch.as(gobject.Object),
             *Self,
@@ -297,7 +299,7 @@ pub const ShellySettingsPage = extern struct {
         if (p.loaded) return;
         p.loaded = true;
 
-        const version = std.fmt.allocPrintSentinel(std.heap.c_allocator, "v{f}", .{options.version}, 0) catch |err| {
+        const version = std.fmt.allocPrintSentinel(std.heap.c_allocator, "v{f}", .{features.version}, 0) catch |err| {
             std.log.err("Could not display the Shelly version. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
             return;
         };
@@ -1240,7 +1242,29 @@ fn populateDropdowns(p: *ShellySettingsPage.Private) void {
     gtk.DropDown.setModel(p.language_drop, lang_strings.as(gio.ListModel));
 }
 
+fn hideSettingsRow(widget: anytype) void {
+    if (gtk.Widget.getParent(widget.as(gtk.Widget))) |row| {
+        gtk.Widget.setVisible(row, @intFromBool(false));
+    }
+}
+
+fn hideUnbuiltRows(p: *ShellySettingsPage.Private) void {
+    if (!features.builtWithAur) {
+        hideSettingsRow(p.aur_switch);
+        hideSettingsRow(p.atoll_aur_switch);
+    }
+    if (!features.builtWithFlatpak) hideSettingsRow(p.flatpak_switch);
+    if (!features.builtWithRecommend) hideSettingsRow(p.recommended_switch);
+    if (!features.builtWithAppImage) {
+        hideSettingsRow(p.appimage_switch);
+        gtk.Widget.setVisible(p.appimage_install_path_box.as(gtk.Widget), @intFromBool(false));
+    }
+    if (!features.builtWithShellySearch) hideSettingsRow(p.shelly_search_switch);
+}
+
 fn isPageEntryEnabled(entry: DefaultPageEntry, filter: PageFilter) bool {
+    if (!features.builtWith(entry.value)) return false;
+
     return switch (entry.value) {
         .recommend => filter.recommended,
         .packages => true,
@@ -1452,7 +1476,7 @@ test "Flatpak support uses libflatpak and the configured companion backend" {
     defer std.testing.allocator.free(standard_argv);
     try std.testing.expectEqualSlices(
         []const u8,
-        &.{ "install", "standard", options.flatpak_backend_package },
+        &.{ "install", "standard", features.flatpak_backend_package },
         standard_argv,
     );
 
@@ -1460,7 +1484,7 @@ test "Flatpak support uses libflatpak and the configured companion backend" {
     defer std.testing.allocator.free(aur_argv);
     try std.testing.expectEqualSlices(
         []const u8,
-        &.{ "install", "aur", options.flatpak_backend_package },
+        &.{ "install", "aur", features.flatpak_backend_package },
         aur_argv,
     );
 }
