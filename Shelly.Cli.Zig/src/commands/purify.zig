@@ -30,14 +30,14 @@ const Options = struct {
     aur_cache_root: ?[]const u8 = null,
     plan_only: bool = false,
     cache_plan: ?*const PackageManager.Manager.CacheRemovalPlan = null,
-    aur_cache_plans: ?[]const PackageManager.Manager.CacheRemovalPlan = null,
+    aur_cache_plans: ?[]const aur_cache.RemovalPlan = null,
 };
 
 const Result = struct {
     targets: []const [:0]const u8 = &.{},
     owns_targets: bool = false,
     cache_plan: ?PackageManager.Manager.CacheRemovalPlan = null,
-    aur_cache_plans: []PackageManager.Manager.CacheRemovalPlan = &.{},
+    aur_cache_plans: []aur_cache.RemovalPlan = &.{},
 
     fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         if (self.owns_targets) {
@@ -60,66 +60,69 @@ const Real = struct {
     ) !Result {
         switch (backend) {
             .standard => {
-                const manager = try PackageManager.Manager.init(context.allocator, context.environ, .{
-                    .config_path = context.config_path,
-                    .use_root = true,
-                    .operation_context = operation_context,
-                });
-                defer manager.deinit();
-                manager.setOperationContext(operation_context);
-                defer manager.setOperationContext(null);
-                const planning = options.plan_only or options.dry_run;
+                // Release database handles before clearing Shelly's cached metadata.
+                var result = packages: {
+                    const manager = try PackageManager.Manager.init(context.allocator, context.environ, .{
+                        .config_path = context.config_path,
+                        .use_root = true,
+                        .operation_context = operation_context,
+                    });
+                    defer manager.deinit();
+                    manager.setOperationContext(operation_context);
+                    defer manager.setOperationContext(null);
+                    const planning = options.plan_only or options.dry_run;
 
-                if (!planning and options.aur_cache) {
-                    const plans = options.aur_cache_plans orelse return PurifyError.CachePlanMissing;
-                    try aur_cache.execute(context, operation_context, plans);
-                }
-
-                if (!planning and options.cache_versions != null) {
-                    const cache_plan = options.cache_plan orelse return PurifyError.CachePlanMissing;
-                    var cache_manager = PackageManager.Manager.CacheManager.init(
-                        context.allocator,
-                        context.io,
-                        .{
-                            .cache_directory = cache_plan.cache_directory,
-                            .manager = manager,
-                        },
-                    );
-                    cache_manager.setOperationContext(operation_context);
-                    _ = try cache_manager.execute_cache_removal_plan(cache_plan);
-                }
-
-                var result: Result = .{
-                    .targets = try manager.purify(planning, options.orphans, true),
-                    .owns_targets = true,
-                };
-                errdefer result.deinit(context.allocator);
-
-                if (planning) {
-                    if (options.cache_versions) |keep| {
+                    if (!planning and options.cache_versions != null) {
+                        const cache_plan = options.cache_plan orelse return PurifyError.CachePlanMissing;
                         var cache_manager = PackageManager.Manager.CacheManager.init(
                             context.allocator,
                             context.io,
                             .{
-                                .cache_directory = manager.config.cache_directory,
+                                .cache_directory = cache_plan.cache_directory,
                                 .manager = manager,
                             },
                         );
                         cache_manager.setOperationContext(operation_context);
-                        var cache_plan = try cache_manager.plan_cache_cleanup(.{
-                            .keep = keep,
-                            .dry_run = options.dry_run,
-                        });
-                        errdefer cache_plan.deinit(context.allocator);
-                        try appendCacheTargets(context.allocator, &result, &cache_plan, "cache");
-                        result.cache_plan = cache_plan;
+                        _ = try cache_manager.execute_cache_removal_plan(cache_plan);
                     }
-                    if (options.aur_cache) {
-                        const root = options.aur_cache_root orelse try xdg.shellyCache(context, &.{});
-                        result.aur_cache_plans = try aur_cache.plan(context, operation_context, root, options.dry_run);
-                        for (result.aur_cache_plans) |*cache_plan|
-                            try appendCacheTargets(context.allocator, &result, cache_plan, "aur-cache");
+
+                    var package_result: Result = .{
+                        .targets = try manager.purify(planning, options.orphans, true),
+                        .owns_targets = true,
+                    };
+                    errdefer package_result.deinit(context.allocator);
+
+                    if (planning) {
+                        if (options.cache_versions) |keep| {
+                            var cache_manager = PackageManager.Manager.CacheManager.init(
+                                context.allocator,
+                                context.io,
+                                .{
+                                    .cache_directory = manager.config.cache_directory,
+                                    .manager = manager,
+                                },
+                            );
+                            cache_manager.setOperationContext(operation_context);
+                            var cache_plan = try cache_manager.plan_cache_cleanup(.{
+                                .keep = keep,
+                                .dry_run = options.dry_run,
+                            });
+                            errdefer cache_plan.deinit(context.allocator);
+                            try appendCacheTargets(context.allocator, &package_result, &cache_plan, "cache");
+                            package_result.cache_plan = cache_plan;
+                        }
+                        if (options.aur_cache) {
+                            const root = options.aur_cache_root orelse try xdg.shellyCache(context, &.{});
+                            package_result.aur_cache_plans = try aur_cache.plan(context, operation_context, root, options.dry_run);
+                            try appendAurCacheTargets(context.allocator, &package_result);
+                        }
                     }
+                    break :packages package_result;
+                };
+                errdefer result.deinit(context.allocator);
+                if (!options.plan_only and !options.dry_run and options.aur_cache) {
+                    const plans = options.aur_cache_plans orelse return PurifyError.CachePlanMissing;
+                    try aur_cache.execute(context, operation_context, plans);
                 }
                 return result;
             },
@@ -419,6 +422,29 @@ fn executeUi(
     return if (reporter.failed()) 1 else 0;
 }
 
+fn appendAurCacheTargets(allocator: std.mem.Allocator, result: *Result) !void {
+    std.debug.assert(result.owns_targets);
+    if (result.aur_cache_plans.len == 0) return;
+    const combined = try allocator.alloc([:0]const u8, result.targets.len + result.aur_cache_plans.len);
+    @memcpy(combined[0..result.targets.len], result.targets);
+    var initialized = result.targets.len;
+    errdefer {
+        for (combined[result.targets.len..initialized]) |target| allocator.free(target);
+        allocator.free(combined);
+    }
+    for (result.aur_cache_plans) |entry| {
+        combined[initialized] = try std.fmt.allocPrintSentinel(
+            allocator,
+            "[aur-cache] {s}{s}",
+            .{ entry.full_path, if (entry.directory) " (directory and all contents)" else "" },
+            0,
+        );
+        initialized += 1;
+    }
+    allocator.free(result.targets);
+    result.targets = combined;
+}
+
 fn appendCacheTargets(
     allocator: std.mem.Allocator,
     result: *Result,
@@ -446,7 +472,7 @@ fn appendCacheTargets(
             "[{s}] {s} {s} ({d} B)",
             .{
                 label,
-                if (std.mem.eql(u8, label, "aur-cache")) item.package.full_path else item.package.name,
+                item.package.name,
                 item.package.version_release,
                 item.package.file_size +| item.signature_size,
             },
@@ -773,8 +799,7 @@ test "AUR cache cleanup previews files and deletes only after confirmation" {
                 };
                 errdefer result.deinit(context.allocator);
                 result.aur_cache_plans = try aur_cache.plan(context, operations, try xdg.shellyCache(context, &.{}), options.dry_run);
-                for (result.aur_cache_plans) |*cache_plan|
-                    try appendCacheTargets(context.allocator, &result, cache_plan, "aur-cache");
+                try appendAurCacheTargets(context.allocator, &result);
                 return result;
             }
             self.mutations += 1;
@@ -796,6 +821,7 @@ test "AUR cache cleanup previews files and deletes only after confirmation" {
         try std.testing.expect(invocation == .dispatch);
         try std.testing.expectEqual(@as(?u8, 0), try dispatchWithRunner(&tc.context, &invocation.dispatch, &runner));
         const preview = std.mem.indexOf(u8, tc.stdout.writer.buffered(), "[aur-cache]").?;
+        try std.testing.expect(std.mem.indexOf(u8, tc.stdout.writer.buffered(), "(directory and all contents)") != null);
         if (index != 0)
             try std.testing.expect(preview < std.mem.indexOf(u8, tc.stdout.writer.buffered(), "Proceed with purify?").?);
         if (index < 2) {
@@ -804,7 +830,8 @@ test "AUR cache cleanup previews files and deletes only after confirmation" {
         }
     }
     try std.testing.expectEqual(@as(usize, 1), runner.mutations);
-    try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, archive, .{}));
+    try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "Shelly/example", .{}));
+    _ = try temporary.dir.statFile(std.testing.io, "Shelly", .{});
 }
 
 test "purify confirmation is default deny" {

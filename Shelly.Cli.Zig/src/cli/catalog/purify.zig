@@ -13,7 +13,7 @@ pub const variants = [_]types.Variant{
         .options = &.{
             flag("--dry-run", &.{"-d"}, "Show the cleanup plan without changing packages"),
             flag("--orphans", &.{"-o"}, "Include orphaned packages"),
-            flag("--aur-cache", &.{}, "Delete all built AUR package archives and matching signatures from Shelly's cache"),
+            flag("--aur-cache", &.{}, "Delete everything in Shelly's cache, including AUR sources, build directories, and checkouts"),
             .{
                 .name = "--aur-cache-root",
                 .type = "string",
