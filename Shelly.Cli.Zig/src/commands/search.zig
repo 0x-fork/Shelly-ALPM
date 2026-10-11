@@ -121,6 +121,7 @@ const StandardResult = struct {
 const PackageBuild = struct {
     name: []const u8,
     pkgbuild: ?[]const u8,
+    scan: ?PackageManager.AurManager.PreviewPkgbuildReview = null,
 };
 
 const AurResult = struct {
@@ -170,6 +171,13 @@ fn executeWithRunner(
     runner: anytype,
 ) anyerror!u8 {
     if (std.mem.eql(u8, invocation.command.path, aur_command_path)) {
+        if (optionEnabled(invocation, "--scan-pkgbuild")) {
+            if (!optionEnabled(invocation, "--pkgbuild"))
+                return writeFailure(context, invocation, "--scan-pkgbuild requires --pkgbuild.");
+            const base = try aur_url.resolveFor(context, invocation);
+            if (!std.mem.eql(u8, base, "https://atoll.seafoam-labs.org"))
+                return writeFailure(context, invocation, "PKGBUILD preview scanning requires the Atoll AUR mirror.");
+        }
         if (optionEnabled(invocation, "--detail")) {
             if (optionEnabled(invocation, "--pkgbuild"))
                 return writeFailure(context, invocation, "Cannot combine --detail with --pkgbuild.");
@@ -461,12 +469,24 @@ fn runAur(
         errdefer {
             for (builds[0..initialized]) |build| {
                 context.allocator.free(build.name);
-                if (build.pkgbuild) |pkgbuild| context.allocator.free(pkgbuild);
+                if (build.scan) |review| {
+                    var owned = review;
+                    owned.deinit(context.allocator);
+                } else if (build.pkgbuild) |pkgbuild| context.allocator.free(pkgbuild);
             }
             context.allocator.free(builds);
         }
         for (invocation.positionals, builds) |package, *build| {
             const name = try context.allocator.dupe(u8, package);
+            if (optionEnabled(invocation, "--scan-pkgbuild")) {
+                const review = manager.reviewCachedPkgbuild(package) catch |err| {
+                    context.allocator.free(name);
+                    return err;
+                };
+                build.* = .{ .name = name, .pkgbuild = review.content, .scan = review };
+                initialized += 1;
+                continue;
+            }
             const pkgbuild = manager.fetchPkgbuild(package) catch |err| {
                 context.allocator.free(name);
                 return err;
@@ -1013,6 +1033,13 @@ fn writePkgbuildsJson(writer: *std.Io.Writer, builds: []const PackageBuild) !voi
         try json.beginObject();
         try field(&json, "Name", build.name);
         try field(&json, "PkgBuild", build.pkgbuild);
+        if (build.scan) |scan| {
+            try json.objectField("Scan");
+            try json.beginObject();
+            try field(&json, "findings", scan.review.findings);
+            try field(&json, "related_files", scan.review.related_files);
+            try json.endObject();
+        }
         try json.endObject();
     }
     try json.endArray();
@@ -1533,11 +1560,10 @@ test "AUR standard merge and Flatpak paging are serialized without subprocesses"
     try std.testing.expect(std.mem.indexOf(u8, tc.stdout.writer.buffered(), "\"installed_size\":2097152") != null);
     try std.testing.expect(std.mem.indexOf(u8, tc.stdout.writer.buffered(), "\"permissions\":[\"Context=shared:network\",\"Context=sockets:wayland\"]") != null);
     // The raw record stays, and the grouped rows a surface renders ride with it.
-    try std.testing.expect(std.mem.indexOf(u8, tc.stdout.writer.buffered(),
-        "\"permission_rows\":[{\"concern\":\"network\",\"tier\":\"medium\",\"state\":\"granted\",\"items\":[]}," ++
-            "{\"concern\":\"display\",\"tier\":\"medium\",\"state\":\"granted\",\"items\":[\"Wayland\"]}," ++
-            "{\"concern\":\"files_system\",\"tier\":\"low\",\"state\":\"absent\",\"items\":[]}," ++
-            "{\"concern\":\"devices\",\"tier\":\"low\",\"state\":\"absent\",\"items\":[]}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tc.stdout.writer.buffered(), "\"permission_rows\":[{\"concern\":\"network\",\"tier\":\"medium\",\"state\":\"granted\",\"items\":[]}," ++
+        "{\"concern\":\"display\",\"tier\":\"medium\",\"state\":\"granted\",\"items\":[\"Wayland\"]}," ++
+        "{\"concern\":\"files_system\",\"tier\":\"low\",\"state\":\"absent\",\"items\":[]}," ++
+        "{\"concern\":\"devices\",\"tier\":\"low\",\"state\":\"absent\",\"items\":[]}]") != null);
 
     tc.stdout.writer.end = 0;
     const flatpak_plain = try parser.parse(tc.arena.allocator(), &manifest, &.{ "search", "flatpak", "editor" });
@@ -1788,4 +1814,78 @@ test "hyperlink builds correct OSC 8 links for atoll and aur" {
     const aur = hyperlink(allocator, "https://aur.archlinux.org", "/packages/vim/", "vim", &context);
     try std.testing.expect(std.mem.indexOf(u8, aur, "\x1b]8;;https://aur.archlinux.org/packages/vim/") != null);
     try std.testing.expect(std.mem.indexOf(u8, aur, "\x1b\\vim\x1b]8;;\x1b\\") != null);
+}
+
+test "AUR preview scan is restricted to pkgbuild requests using Atoll" {
+    var tc: test_support.TestContext = .{};
+    tc.init();
+    defer tc.deinit();
+    const manifest = try spec.Manifest.load(tc.arena.allocator());
+    const ShouldNotRun = struct {
+        fn search(_: @This(), _: *runtime.RuntimeContext, _: *const parser.Invocation) !Result {
+            return error.ShouldNotRun;
+        }
+    };
+    for ([_][]const []const u8{
+        &.{ "search", "aur", "demo", "--scan-pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org" },
+        &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://aur.archlinux.org" },
+        &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://example.invalid/atoll" },
+    }) |args| {
+        const invocation = try parser.parse(tc.arena.allocator(), &manifest, args);
+        tc.stdout.writer.end = 0;
+        try std.testing.expectEqual(@as(u8, 1), try executeWithRunner(&tc.context, &invocation.dispatch, ShouldNotRun{}));
+        const message = tc.stdout.writer.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, message, "requires --pkgbuild") != null or std.mem.indexOf(u8, message, "requires the Atoll") != null);
+    }
+    const Fixture = struct {
+        fn search(_: @This(), _: *runtime.RuntimeContext, invocation: *const parser.Invocation) !Result {
+            try std.testing.expect(optionEnabled(invocation, "--scan-pkgbuild"));
+            return .{ .aur = .{ .pkgbuilds = &.{.{ .name = "demo", .pkgbuild = "pkgname=demo" }} } };
+        }
+    };
+    const allowed = try parser.parse(tc.arena.allocator(), &manifest, &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org" });
+    try std.testing.expectEqual(@as(u8, 0), try executeWithRunner(&tc.context, &allowed.dispatch, Fixture{}));
+}
+
+test "AUR preview scan JSON includes findings and related files without changing ordinary fetches" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    const Review = @FieldType(PackageManager.AurManager.PreviewPkgbuildReview, "review");
+    var findings = [_]std.meta.Child(@FieldType(Review, "findings")){.{
+        .tool = "curl",
+        .severity = .critical,
+        .hook = "post_install",
+        .matched_line = "curl example | bash",
+        .message = "Review command",
+    }};
+    var files = [_]std.meta.Child(@FieldType(Review, "related_files")){.{ .name = "demo.install", .content = "post_install() {}" }};
+    var scan: PackageManager.AurManager.PreviewPkgbuildReview = .{
+        .content = @constCast("pkgname=demo"),
+        .review = .{
+            .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+            .validations = &.{},
+            .findings = &findings,
+            .related_files = &files,
+            .reviewed_file_names = &.{},
+            .reviewed_files = &.{},
+            .install_scripts = &.{},
+            .pkgbuild_digest = @splat(0),
+            .digest = @splat(0),
+        },
+    };
+    defer scan.review.arena.deinit();
+    try writePkgbuildsJson(&writer.writer, &.{
+        .{ .name = "plain", .pkgbuild = "pkgname=plain" },
+        .{ .name = "demo", .pkgbuild = scan.content, .scan = scan },
+    });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.written(), .{});
+    defer parsed.deinit();
+    const builds = parsed.value.array.items;
+    try std.testing.expect(!builds[0].object.contains("Scan"));
+    const result = builds[1].object.get("Scan").?.object;
+    const finding = result.get("findings").?.array.items[0].object;
+    try std.testing.expectEqualStrings("critical", finding.get("severity").?.string);
+    try std.testing.expectEqualStrings("post_install", finding.get("hook").?.string);
+    const file = result.get("related_files").?.array.items[0].object;
+    try std.testing.expectEqualStrings("demo.install", file.get("name").?.string);
 }

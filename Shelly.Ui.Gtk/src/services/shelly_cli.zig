@@ -338,8 +338,19 @@ pub const ShellyCli = struct {
         return error.NoDataFrame;
     }
 
+    pub const PkgbuildFetchMode = enum { preview, atoll_preview, atoll_scan };
+
     pub fn fetch_pkgbuild(self: ShellyCli, name: []const u8) !std.json.Parsed([]PkgBuild) {
-        const result = try self.run(&.{ "search", "aur", name, "--pkgbuild" });
+        return self.fetchPkgbuild(name, .preview);
+    }
+
+    pub fn fetchPkgbuild(self: ShellyCli, name: []const u8, mode: PkgbuildFetchMode) !std.json.Parsed([]PkgBuild) {
+        const args: []const []const u8 = switch (mode) {
+            .preview => &.{ "search", "aur", name, "--pkgbuild" },
+            .atoll_preview => &.{ "search", "aur", name, "--pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org" },
+            .atoll_scan => &.{ "search", "aur", name, "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org" },
+        };
+        const result = try self.run(args);
         defer self.allocator.free(result.stderr);
         defer self.allocator.free(result.stdout);
 

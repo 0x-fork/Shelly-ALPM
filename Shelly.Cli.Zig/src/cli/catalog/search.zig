@@ -45,6 +45,7 @@ pub const variants = [_]types.Variant{
         .options = &.{
             flag("--standard", &.{"-s"}, "Append high-confidence standard ALPM repository matches to the AUR results"),
             flag("--pkgbuild", &.{"-p"}, "Fetch and display the PKGBUILD for each exact AUR package name"),
+            flag("--scan-pkgbuild", &.{}, "With --pkgbuild, review the cached Atoll checkout without fetching it again"),
             flag("--detail", &.{ "--info", "-d" }, "Show complete metadata for one exact AUR package name"),
         },
     },

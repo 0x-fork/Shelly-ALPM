@@ -800,6 +800,7 @@ pub fn build(b: *std.Build) void {
             "unsafe package bases cannot escape the AUR cache",
             "RPC client keeps an owned copy of its configured endpoint",
             "custom AUR base fetches PKGBUILDs from its Git checkout",
+            "AUR preview scan uses cached Atoll files and matches install validation",
             "AUR dependency planning uses sandbox-evaluated conditional arrays",
             "custom AUR base PKGBUILD failures stay actionable",
             "custom AUR base ignores unverified cached SRCINFO provenance",
