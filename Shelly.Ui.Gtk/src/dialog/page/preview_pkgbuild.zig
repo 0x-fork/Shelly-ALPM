@@ -395,28 +395,25 @@ pub const PkgbuildReviewDialog = extern struct {
     }
 
     fn make_source_row(file: InstallReview.SourceFile) *gtk.Widget {
-        const box = gtk.Box.new(.vertical, 6);
-        gtk.Widget.setMarginTop(box.as(gtk.Widget), 6);
+        const box = gtk.Box.new(.vertical, 8);
+        gtk.Widget.setHexpand(box.as(gtk.Widget), 1);
 
         const title = gtk.Label.new(file.name);
         gtk.Label.setXalign(title, 0);
+        gtk.Label.setSelectable(title, 1);
+        gtk.Label.setWrap(title, 1);
         gtk.Widget.addCssClass(title.as(gtk.Widget), "heading");
         gtk.Box.append(box, title.as(gtk.Widget));
 
         const view = gtk.TextView.new();
         gtk.TextView.setEditable(view, 0);
         gtk.TextView.setMonospace(view, 1);
-        gtk.TextView.setWrapMode(view, .word_char);
+        gtk.TextView.setWrapMode(view, .none);
         gtk.TextView.setCursorVisible(view, 0);
         const buffer = gtk.TextView.getBuffer(view);
         gtk.TextBuffer.setText(buffer, file.content, @intCast(file.content.len));
 
-        const scroll = gtk.ScrolledWindow.new();
-        gtk.ScrolledWindow.setPolicy(scroll, .automatic, .automatic);
-        gtk.ScrolledWindow.setMinContentHeight(scroll, 160);
-        gtk.ScrolledWindow.setChild(scroll, view.as(gtk.Widget));
-
-        gtk.Box.append(box, scroll.as(gtk.Widget));
+        gtk.Box.append(box, view.as(gtk.Widget));
 
         return box.as(gtk.Widget);
     }
