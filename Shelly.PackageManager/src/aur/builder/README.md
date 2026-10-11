@@ -77,6 +77,23 @@ Version edits verify the reviewed inputs before writing and preserve the file's
 ownership and permissions. Only the version and release edit is automatically
 accepted; changed or newly discovered related inputs require another review.
 
+## Source archive overlays
+
+Source archives are extracted in `source=()` order. A later regular archive
+entry replaces an earlier regular archive entry at the same normalized path,
+including entries from another archive. The replacement gets the later entry's
+contents, permissions, and modification time. Files are unlinked and recreated,
+so existing hard links keep their original inode and contents. Hard-link targets
+must still belong to the same archive; link destinations and conflicting entry
+types cannot be replaced. Directories continue to merge.
+
+All source aliases are reserved before extraction, including later sources,
+`noextract` inputs, and Git checkout subtrees. Archive entries cannot overwrite
+these inputs or standalone decompression outputs. An archive may still extract
+its own matching root directory (for example, an extensionless renamed tarball);
+in that case its raw payload does not overwrite the extracted directory. Failed
+or cancelled extraction discards staging and preserves the previous source tree.
+
 ## Files
 
 | File | Role |

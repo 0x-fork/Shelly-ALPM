@@ -4537,7 +4537,40 @@ test "PackageBuilder rejects duplicate source archive entries with conflicting t
     }
 }
 
-test "PackageBuilder rejects duplicate regular files from another source archive" {
+test "PackageBuilder overlays source archives in source order with final metadata" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_][]const u8{ "'first.tar' 'second.tar'", "'second.tar' 'first.tar'", "'first.tar' 'second.tar' 'third.tar'" }) |sources| {
+        const three = std.mem.indexOf(u8, sources, "third") != null;
+        const pkgbuild = try std.fmt.allocPrint(allocator, "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\nsource=({s})\nsha256sums=({s})\npackage() {{ :; }}\n", .{ sources, if (three) "'SKIP' 'SKIP' 'SKIP'" else "'SKIP' 'SKIP'" });
+        defer allocator.free(pkgbuild);
+        var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+        defer fixture.destroy();
+        const names = [_][]const u8{ "first.tar", "second.tar", "third.tar" };
+        const contents = [_][]const u8{ "long original contents", "short", "" };
+        const modes = [_]u32{ 0o444, 0o640, 0o600 };
+        for (names, 0..) |name, index| {
+            const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, name });
+            defer allocator.free(path);
+            try archive.writeFixture(allocator, path, .none, &.{
+                .{ .path = "demo", .kind = .directory },
+                .{ .path = "./demo//manifest.txt", .contents = contents[index], .permissions = modes[index], .mtime = .{ .nanoseconds = (1_234_567_890 + @as(i96, @intCast(index))) * std.time.ns_per_s } },
+            });
+        }
+        fixture.builder.options.sources_prepared = false;
+        const artifacts = try fixture.builder.BuildPackage();
+        defer builder_mod.deinitArtifacts(allocator, artifacts);
+        const last: usize = if (three) 2 else if (std.mem.startsWith(u8, sources, "'first")) 1 else 0;
+        const actual = try fixture.temporary.dir.readFileAlloc(io, "src/demo/manifest.txt", allocator, .unlimited);
+        defer allocator.free(actual);
+        try testing.expectEqualStrings(contents[last], actual);
+        const stat = try fixture.temporary.dir.statFile(io, "src/demo/manifest.txt", .{});
+        try testing.expectEqual(modes[last], stat.permissions.toMode() & 0o777);
+        try testing.expectEqual((1_234_567_890 + @as(i96, @intCast(last))) * std.time.ns_per_s, stat.mtime.nanoseconds);
+    }
+}
+
+test "PackageBuilder overlays source archives without changing earlier hard link inodes" {
     const allocator = testing.allocator;
     const io = testing.io;
     var fixture = try Fixture.create(allocator,
@@ -4545,28 +4578,119 @@ test "PackageBuilder rejects duplicate regular files from another source archive
         \\pkgver=1
         \\pkgrel=1
         \\arch=('any')
-        \\source=('first.tar.gz' 'second.tar.gz')
+        \\source=('first.tar' 'second.tar')
         \\sha256sums=('SKIP' 'SKIP')
-        \\prepare() { touch "$startdir/prepare-ran"; }
         \\package() { :; }
     , null, null);
     defer fixture.destroy();
-    for ([_][]const u8{ "first.tar.gz", "second.tar.gz" }) |name| {
-        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, name });
+    const first = try std.fs.path.join(allocator, &.{ fixture.build_dir, "first.tar" });
+    defer allocator.free(first);
+    const second = try std.fs.path.join(allocator, &.{ fixture.build_dir, "second.tar" });
+    defer allocator.free(second);
+    try archive.writeFixture(allocator, first, .none, &.{
+        .{ .path = "manifest", .contents = "original", .permissions = 0o444 },
+        .{ .path = "old-link", .kind = .hard_link, .link_target = "manifest" },
+    });
+    try archive.writeFixture(allocator, second, .none, &.{
+        .{ .path = "new-link", .kind = .hard_link, .link_target = "manifest" },
+        .{ .path = "manifest", .contents = "intermediate" },
+        .{ .path = "./manifest", .contents = "final" },
+    });
+    fixture.builder.options.sources_prepared = false;
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    for ([_][2][]const u8{ .{ "src/old-link", "original" }, .{ "src/new-link", "final" }, .{ "src/manifest", "final" } }) |pair| {
+        const actual = try fixture.temporary.dir.readFileAlloc(io, pair[0], allocator, .unlimited);
+        defer allocator.free(actual);
+        try testing.expectEqualStrings(pair[1], actual);
+    }
+    const original = try fixture.temporary.dir.statFile(io, "src/old-link", .{});
+    const current = try fixture.temporary.dir.statFile(io, "src/manifest", .{});
+    const link = try fixture.temporary.dir.statFile(io, "src/new-link", .{});
+    try testing.expect(original.inode != current.inode);
+    try testing.expectEqual(current.inode, link.inode);
+}
+
+test "PackageBuilder overlays source archives including VMware ISO manifests" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('linux.iso' 'linuxPreGlibc25.iso')
+        \\sha256sums=('SKIP' 'SKIP')
+        \\prepare() { test "$(cat manifest.txt)" = legacy; }
+        \\package() { :; }
+    , null, null);
+    defer fixture.destroy();
+    for ([_][2][]const u8{ .{ "linux.iso", "current" }, .{ "linuxPreGlibc25.iso", "legacy" } }) |pair| {
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, pair[0] });
         defer allocator.free(path);
-        try archive.writeFixture(allocator, path, .gzip, &.{
-            .{ .path = "demo/Cargo.toml", .contents = name },
-            .{ .path = "demo/Cargo.toml", .contents = "revision" },
+        try archive.writeIsoFixture(allocator, path, &.{
+            .{ .path = "manifest.txt", .contents = pair[1], .permissions = 0o555 },
+            .{ .path = "run_upgrader.sh", .contents = pair[1], .permissions = 0o555 },
         });
     }
-    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "src/keep", .data = "previous source tree" });
     fixture.builder.options.sources_prepared = false;
-    try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
-    const kept = try fixture.temporary.dir.readFileAlloc(io, "src/keep", allocator, .unlimited);
-    defer allocator.free(kept);
-    try testing.expectEqualStrings("previous source tree", kept);
-    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
-    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "prepare-ran", .{}));
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    for ([_][]const u8{ "linux.iso", "linuxPreGlibc25.iso" }) |name| {
+        const staged = try std.fs.path.join(allocator, &.{ "src", name });
+        defer allocator.free(staged);
+        const original = try fixture.temporary.dir.readFileAlloc(io, name, allocator, .unlimited);
+        defer allocator.free(original);
+        const actual = try fixture.temporary.dir.readFileAlloc(io, staged, allocator, .unlimited);
+        defer allocator.free(actual);
+        try testing.expectEqualSlices(u8, original, actual);
+    }
+}
+
+test "PackageBuilder overlays source archives reject conflicting types and roll back replacements" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const cases = [_][2]archive.FixtureEntry{
+        .{ .{ .path = "entry", .link_target = "target" }, .{ .path = "entry", .contents = "replacement" } },
+        .{ .{ .path = "entry", .kind = .hard_link, .link_target = "target" }, .{ .path = "entry", .contents = "replacement" } },
+        .{ .{ .path = "entry", .kind = .directory }, .{ .path = "entry", .contents = "replacement" } },
+        .{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .link_target = "target" } },
+        .{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .kind = .hard_link, .link_target = "target" } },
+        .{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .kind = .directory } },
+        .{ .{ .path = "entry", .link_target = "." }, .{ .path = "entry/child", .contents = "replacement" } },
+        .{ .{ .path = "entry/child", .contents = "original" }, .{ .path = "entry", .contents = "replacement" } },
+        .{ .{ .path = "entry", .contents = "original" }, .{ .path = "../outside", .contents = "replacement" } },
+    };
+    for (cases) |pair| {
+        var fixture = try Fixture.create(allocator,
+            \\pkgname=demo
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('first.tar' 'second.tar')
+            \\sha256sums=('SKIP' 'SKIP')
+            \\prepare() { touch "$startdir/prepare-ran"; }
+            \\package() { :; }
+        , null, null);
+        defer fixture.destroy();
+        for ([_][]const u8{ "first.tar", "second.tar" }, 0..) |name, index| {
+            const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, name });
+            defer allocator.free(path);
+            try archive.writeFixture(allocator, path, .none, &.{
+                .{ .path = "manifest", .contents = name },
+                .{ .path = "target", .contents = name },
+                pair[index],
+            });
+        }
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "src/keep", .data = "previous source tree" });
+        fixture.builder.options.sources_prepared = false;
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        const kept = try fixture.temporary.dir.readFileAlloc(io, "src/keep", allocator, .unlimited);
+        defer allocator.free(kept);
+        try testing.expectEqualStrings("previous source tree", kept);
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "prepare-ran", .{}));
+    }
 }
 
 test "PackageBuilder extracts libblockdev source hard links and forward chains" {
@@ -4960,31 +5084,87 @@ test "PackageBuilder extracts an extensionless source over its matching archive 
     try fixture.temporary.dir.access(io, "pkg/demo/usr/share/demo/font.woff2", .{});
 }
 
-test "PackageBuilder rejects an archive root colliding with another staged source" {
+test "PackageBuilder overlays source archives protect raw and noextract sources in either order" {
     const allocator = testing.allocator;
     const io = testing.io;
-    var fixture = try Fixture.create(allocator,
-        \\pkgname=demo
-        \\pkgver=1
-        \\pkgrel=1
-        \\arch=('any')
-        \\source=('victim.txt' 'collision')
-        \\sha256sums=('SKIP' 'SKIP')
-        \\package() { mkdir -p "$pkgdir"; }
-    , null, null);
-    defer fixture.destroy();
-    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "victim.txt", .data = "victim\n" });
-    const archive_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "collision" });
-    defer allocator.free(archive_path);
-    try archive.writeFixture(allocator, archive_path, .gzip, &.{
-        .{ .path = "victim.txt", .contents = "archive overwrite\n" },
-    });
-    fixture.builder.options.sources_prepared = false;
-    try fixture.temporary.dir.deleteTree(io, "src");
+    for ([_][]const u8{ "'victim.txt' 'collision'", "'collision' 'victim.txt'" }) |sources| {
+        for ([_][]const u8{ "", "noextract=('victim.txt')" }) |noextract| {
+            for ([_]archive.FixtureEntry{
+                .{ .path = "victim.txt", .contents = "archive overwrite" },
+                .{ .path = "victim.txt", .kind = .directory },
+                .{ .path = "victim.txt/child", .contents = "ancestor collision" },
+                .{ .path = "victim.txt", .link_target = "target" },
+                .{ .path = "victim.txt", .kind = .hard_link, .link_target = "target" },
+            }) |entry| {
+                const pkgbuild = try std.fmt.allocPrint(allocator, "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\nsource=({s})\nsha256sums=('SKIP' 'SKIP')\n{s}\npackage() {{ :; }}\n", .{ sources, noextract });
+                defer allocator.free(pkgbuild);
+                var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+                defer fixture.destroy();
+                try fixture.temporary.dir.writeFile(io, .{ .sub_path = "victim.txt", .data = "victim" });
+                const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "collision" });
+                defer allocator.free(path);
+                try archive.writeFixture(allocator, path, .gzip, &.{ .{ .path = "target", .contents = "payload" }, entry });
+                fixture.builder.options.sources_prepared = false;
+                try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+                const original = try fixture.temporary.dir.readFileAlloc(io, "victim.txt", allocator, .unlimited);
+                defer allocator.free(original);
+                try testing.expectEqualStrings("victim", original);
+                try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+            }
+        }
+    }
+}
 
-    try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
-    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "src", .{}));
-    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+test "PackageBuilder overlays source archives protect standalone outputs in either order" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_][]const u8{ "'payload.gz' 'overlay.tar'", "'overlay.tar' 'payload.gz'" }) |sources| {
+        const pkgbuild = try std.fmt.allocPrint(allocator, "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\nsource=({s})\nsha256sums=('SKIP' 'SKIP')\npackage() {{ :; }}\n", .{sources});
+        defer allocator.free(pkgbuild);
+        var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+        defer fixture.destroy();
+        const standalone = try std.fs.path.join(allocator, &.{ fixture.build_dir, "payload.gz" });
+        defer allocator.free(standalone);
+        const overlay = try std.fs.path.join(allocator, &.{ fixture.build_dir, "overlay.tar" });
+        defer allocator.free(overlay);
+        try archive.writeCompressedFixture(allocator, standalone, .gzip, "standalone");
+        try archive.writeFixture(allocator, overlay, .none, &.{.{ .path = "payload", .contents = "archive" }});
+        fixture.builder.options.sources_prepared = false;
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+    }
+}
+
+test "PackageBuilder overlays source archives protect Git checkout subtrees in either order" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var remote = testing.tmpDir(.{});
+    defer remote.cleanup();
+    const remote_path = try remote.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "init", "-b", "main" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "config", "user.email", "shelly-tests@example.invalid" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "config", "user.name", "Shelly Tests" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "config", "commit.gpgsign", "false" }, remote_path);
+    try remote.dir.writeFile(io, .{ .sub_path = "manifest", .data = "original" });
+    try runTestCommand(allocator, io, &.{ "git", "add", "manifest" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "commit", "-m", "fixture" }, remote_path);
+    const git_source = try std.fmt.allocPrint(allocator, "'repo::git+file://{s}#branch=main'", .{remote_path});
+    defer allocator.free(git_source);
+    for ([_]bool{ false, true }) |git_first| {
+        for ([_][:0]const u8{ "repo/manifest", "repo/new-file", "repo/.git/config" }) |entry_path| {
+            const pkgbuild = try std.fmt.allocPrint(allocator, "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\nsource=({s} {s})\nsha256sums=('SKIP' 'SKIP')\npackage() {{ :; }}\n", .{ if (git_first) git_source else "'overlay.tar'", if (git_first) "'overlay.tar'" else git_source });
+            defer allocator.free(pkgbuild);
+            var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+            defer fixture.destroy();
+            const overlay = try std.fs.path.join(allocator, &.{ fixture.build_dir, "overlay.tar" });
+            defer allocator.free(overlay);
+            try archive.writeFixture(allocator, overlay, .none, &.{.{ .path = entry_path, .contents = "archive" }});
+            fixture.builder.options.sources_prepared = false;
+            try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+            try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+        }
+    }
 }
 
 test "PackageBuilder preserves source archive modification timestamps" {
