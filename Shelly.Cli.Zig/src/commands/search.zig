@@ -174,7 +174,8 @@ fn executeWithRunner(
         if (optionEnabled(invocation, "--scan-pkgbuild")) {
             if (!optionEnabled(invocation, "--pkgbuild"))
                 return writeFailure(context, invocation, "--scan-pkgbuild requires --pkgbuild.");
-            const base = try aur_url.resolveFor(context, invocation);
+            const base = try PackageManager.aur.endpoints.normalizeBase(context.allocator, try aur_url.resolveFor(context, invocation));
+            defer context.allocator.free(base);
             if (!std.mem.eql(u8, base, "https://atoll.seafoam-labs.org"))
                 return writeFailure(context, invocation, "PKGBUILD preview scanning requires the Atoll AUR mirror.");
         }
@@ -809,6 +810,36 @@ fn renderPkgbuilds(
         try colors.printLine(context, .warning, "Package build for: {s}", .{build.name});
         try context.stdout.writeAll(pkgbuild);
         if (!std.mem.endsWith(u8, pkgbuild, "\n")) try context.stdout.writeByte('\n');
+        if (build.scan) |scan| try renderPkgbuildScan(context, &scan);
+    }
+}
+
+fn renderPkgbuildScan(context: *runtime.RuntimeContext, scan: *const PackageManager.AurManager.PreviewPkgbuildReview) !void {
+    try context.stdout.writeByte('\n');
+    const findings = scan.review.findings;
+    if (findings.len == 0) {
+        try colors.printLine(context, .success, "Security scan completed: no findings.", .{});
+    } else {
+        try colors.printLine(context, .warning, "Security scan completed: {d} finding(s).", .{findings.len});
+        for (findings) |finding| {
+            const color: colors.Color = switch (finding.severity) {
+                .critical => .err,
+                .warning => .warning,
+                .info => .info,
+            };
+            try colors.printLine(context, color, "[{s}] {f} — {f}", .{
+                @tagName(finding.severity), diagnostics.safe(finding.tool), diagnostics.safe(finding.hook),
+            });
+            if (finding.message.len > 0)
+                try context.stdout.print("  {f}\n", .{diagnostics.safe(finding.message)});
+            if (finding.matched_line.len > 0)
+                try context.stdout.print("  Matched: {f}\n", .{diagnostics.safe(finding.matched_line)});
+        }
+    }
+    if (scan.review.related_files.len > 0) {
+        try colors.printLine(context, .heading, "Related files:", .{});
+        for (scan.review.related_files) |file|
+            try context.stdout.print("  {f}\n", .{diagnostics.safe(file.name)});
     }
 }
 
@@ -1830,6 +1861,8 @@ test "AUR preview scan is restricted to pkgbuild requests using Atoll" {
         &.{ "search", "aur", "demo", "--scan-pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org" },
         &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://aur.archlinux.org" },
         &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://example.invalid/atoll" },
+        &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org/other/" },
+        &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org.example.invalid/" },
     }) |args| {
         const invocation = try parser.parse(tc.arena.allocator(), &manifest, args);
         tc.stdout.writer.end = 0;
@@ -1843,11 +1876,17 @@ test "AUR preview scan is restricted to pkgbuild requests using Atoll" {
             return .{ .aur = .{ .pkgbuilds = &.{.{ .name = "demo", .pkgbuild = "pkgname=demo" }} } };
         }
     };
-    const allowed = try parser.parse(tc.arena.allocator(), &manifest, &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org" });
-    try std.testing.expectEqual(@as(u8, 0), try executeWithRunner(&tc.context, &allowed.dispatch, Fixture{}));
+    for ([_][]const u8{
+        "https://atoll.seafoam-labs.org",
+        "https://atoll.seafoam-labs.org/",
+        "https://atoll.seafoam-labs.org///",
+    }) |base| {
+        const allowed = try parser.parse(tc.arena.allocator(), &manifest, &.{ "search", "aur", "demo", "--pkgbuild", "--scan-pkgbuild", "--aur-url", base });
+        try std.testing.expectEqual(@as(u8, 0), try executeWithRunner(&tc.context, &allowed.dispatch, Fixture{}));
+    }
 }
 
-test "AUR preview scan JSON includes findings and related files without changing ordinary fetches" {
+test "AUR preview scan renders findings in JSON and plain text without changing ordinary fetches" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
     const Review = @FieldType(PackageManager.AurManager.PreviewPkgbuildReview, "review");
@@ -1888,4 +1927,33 @@ test "AUR preview scan JSON includes findings and related files without changing
     try std.testing.expectEqualStrings("post_install", finding.get("hook").?.string);
     const file = result.get("related_files").?.array.items[0].object;
     try std.testing.expectEqualStrings("demo.install", file.get("name").?.string);
+
+    var tc: test_support.TestContext = .{};
+    tc.init();
+    defer tc.deinit();
+    const manifest = try spec.Manifest.load(tc.arena.allocator());
+    const invocation = try parser.parse(tc.arena.allocator(), &manifest, &.{ "search", "aur", "demo", "--pkgbuild" });
+    try renderPkgbuilds(&tc.context, &invocation.dispatch, &.{.{ .name = "demo", .pkgbuild = scan.content, .scan = scan }});
+    var text = tc.stdout.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "pkgname=demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Security scan completed: 1 finding(s).") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "[critical] curl") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "post_install") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Review command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Matched: curl example | bash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Related files:\n  demo.install") != null);
+
+    tc.stdout.writer.end = 0;
+    scan.review.findings = &.{};
+    try renderPkgbuilds(&tc.context, &invocation.dispatch, &.{.{ .name = "demo", .pkgbuild = scan.content, .scan = scan }});
+    text = tc.stdout.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "Security scan completed: no findings.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "[critical]") == null);
+
+    tc.stdout.writer.end = 0;
+    try renderPkgbuilds(&tc.context, &invocation.dispatch, &.{.{ .name = "demo", .pkgbuild = scan.content }});
+    text = tc.stdout.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "pkgname=demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Security scan") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Related files") == null);
 }
