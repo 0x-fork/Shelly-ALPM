@@ -12,7 +12,7 @@ const runtime = @import("services/runtime.zig");
 const translations = @import("helpers/translations.zig");
 const deep_link = @import("helpers/deep_link.zig");
 const tray_service = @import("services/tray_service.zig");
-const options = @import("options");
+const features = @import("services/build_features.zig");
 const IconDownloadService = @import("services/icon_fetcher.zig").downloadIconsInBackground;
 
 var did_activate: bool = false;
@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) void {
     if (!translations.init()) {
         std.log.warn("Could not initialize translations. Shelly may display untranslated text.", .{});
     }
-    if (!options.skip_background_services) {
+    if (features.builtWithBackgroundServices) {
         IconDownloadService(std.heap.c_allocator, runtime.io);
     }
 
@@ -194,7 +194,7 @@ fn activate(app: *gtk.Application, _: ?*anyopaque) callconv(.c) void {
         }
     }
 
-    if (!options.skip_background_services) tryStartTray(runtime.io, std.heap.c_allocator);
+    if (features.builtWithBackgroundServices) tryStartTray(runtime.io, std.heap.c_allocator);
 
     setupGnomeThemePreference();
 
