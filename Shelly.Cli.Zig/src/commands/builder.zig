@@ -1953,6 +1953,15 @@ fn buildIsolatedChildArguments(
             std.mem.startsWith(u8, argument, "--json=") or
             std.mem.eql(u8, argument, "-j") or
             std.mem.eql(u8, argument, "--")) continue;
+        // The selected repository configuration belongs to the host review and
+        // bootstrap. Its path is not staged inside the guest; dispatch would
+        // fail while resolving it, before the unprivileged build can start.
+        if (std.mem.eql(u8, argument, "--config")) {
+            if (index + 1 >= arguments.len) return error.InvalidConfig;
+            index += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, argument, "--config=")) continue;
         if (std.mem.eql(u8, argument, "--dependency-plan")) {
             if (index + 1 >= arguments.len) return error.InvalidDependencyPlanOptions;
             index += 1;
@@ -4080,6 +4089,47 @@ test "isolated source key preparation checks the digest and refuses unapproved i
     try std.testing.expect(std.mem.startsWith(u8, keys, "-----BEGIN PGP PUBLIC KEY BLOCK-----"));
     try temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content ++ "\n# changed\n" });
     try std.testing.expectError(error.ReviewedPkgbuildChanged, prepareSourcePgpKeyExport(&context.context, &approved.dispatch, &operations));
+}
+
+test "isolated child arguments keep host repository configuration outside the guest" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const manifest = try @import("../cli/spec.zig").Manifest.load(arena.allocator());
+    const digest = "ab" ** 32;
+    const host_config = "/var/lib/remora/build/.jobs/2883/dependency-environment/pacman.conf";
+    const cases = [_][]const []const u8{
+        &.{ "--config", host_config, "build", "--isolated", "--check", "/host/PKGBUILD" },
+        &.{ "--config=" ++ host_config, "build", "--isolated", "--check", "/host/PKGBUILD" },
+        &.{ "build", "--isolated", "--config", host_config, "--check", "/host/PKGBUILD" },
+        &.{ "build", "--isolated", "--config=" ++ host_config, "--check", "/host/PKGBUILD" },
+        &.{ "build", "--isolated", "--check", "/host/PKGBUILD" },
+    };
+    for (cases, 0..) |args, case_index| {
+        const guest = try buildIsolatedChildArguments(allocator, args, "/host/PKGBUILD", digest, false);
+        defer allocator.free(guest);
+        const parsed = try parser.parse(arena.allocator(), &manifest, guest);
+        try std.testing.expect(parsed == .dispatch);
+        try std.testing.expect(parsed.dispatch.globals.config_path == null);
+        for (guest) |argument| {
+            try std.testing.expect(std.mem.indexOf(u8, argument, host_config) == null);
+        }
+        try std.testing.expectEqual(@as(usize, 1), parsed.dispatch.positionals.len);
+        try std.testing.expectEqualStrings("/build/source/PKGBUILD", parsed.dispatch.positionals[0]);
+        try std.testing.expectEqualStrings(digest, optionValue(&parsed.dispatch, "--review-digest").?);
+        try std.testing.expect(optionEnabled(&parsed.dispatch, "--check"));
+        try std.testing.expect(optionEnabled(&parsed.dispatch, "--coordinator-child"));
+        try std.testing.expect(optionEnabled(&parsed.dispatch, "--nosign"));
+
+        // Guest filtering must leave the host's selected configuration intact.
+        const host = try parser.parse(arena.allocator(), &manifest, args);
+        try std.testing.expect(host == .dispatch);
+        if (case_index < cases.len - 1) {
+            try std.testing.expectEqualStrings(host_config, host.dispatch.globals.config_path.?);
+        } else {
+            try std.testing.expect(host.dispatch.globals.config_path == null);
+        }
+    }
 }
 
 test "isolated configuration preserves build policy and forces guest-local destinations" {

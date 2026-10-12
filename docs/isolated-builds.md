@@ -241,6 +241,16 @@ through the CLI's `test` target, or directly with:
 zig build --build-file Shelly.Cli.Zig/build.zig isolated-source-keys-test
 ```
 
+The host repository configuration selected by `--config PATH` or `--config=PATH`
+is used for review, dependency resolution, and root provisioning. It is omitted
+from the guest command because its host path is not staged in the isolated root.
+The guest continues to use the generated `/etc/shellybuild.conf`. Run the
+argument-forwarding and guest build-policy regressions without elevation with:
+
+```sh
+zig build --build-file Shelly.Cli.Zig/build.zig isolated-config-test
+```
+
 Run the root-required smoke test from a normal user session with `jq` and
 `sudo` installed:
 

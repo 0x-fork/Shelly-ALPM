@@ -132,6 +132,13 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"shellystrap"},
     });
     configuration_step.dependOn(&b.addRunArtifact(bootstrap_configuration_tests).step);
+    const isolated_config_tests = b.addTest(.{
+        .name = "isolated-config-test",
+        .root_module = builder_test_module,
+        .filters = &.{ "isolated child arguments", "isolated configuration preserves build policy" },
+    });
+    b.step("isolated-config-test", "Test host configuration isolation from guest build commands")
+        .dependOn(&b.addRunArtifact(isolated_config_tests).step);
     const builder_tests = b.addTest(.{
         .name = "builder-command-test",
         .root_module = builder_test_module,
