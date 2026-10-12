@@ -6790,6 +6790,21 @@ test "PackageBuilder supports CachyOS generated split package functions" {
         try testing.expect(package_build.has_complete_split_functions);
     }
 
+    try fixture.temporary.dir.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, testing.io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.success);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "pkgdesc = Headers for the CachyOS kernel kernel\n") != null);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "depends = linux-cachyos\n") != null);
+
     const artifacts = try fixture.builder.BuildPackage();
     defer builder_mod.deinitArtifacts(allocator, artifacts);
     try testing.expectEqual(@as(usize, 2), artifacts.len);
@@ -7739,4 +7754,185 @@ test "PackageBuilder standalone rejects output symlinks and unsafe stripped name
         try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
         try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
     }
+}
+
+// The dispatch shape in opentelemetry-python-contrib (issue #1981), reduced
+// to an offline package. Both metadata and packaging depend on eval results.
+const generated_split_fixture =
+    \\pkgbase=generated
+    \\pkgname=(generated-one generated-two)
+    \\pkgver=1
+    \\pkgrel=1
+    \\arch=(any)
+    \\package() { exit 91; }
+    \\unset -f package
+    \\package_generated-one() { exit 92; }
+    \\package_generated-two() { exit 93; }
+    \\main() {
+    \\  eval 'emit() { printf "%s\n" "$pkgname" > "$pkgdir/member"; }'
+    \\  for name in "${pkgname[@]}"; do
+    \\    eval "package_${name}() {
+    \\      pkgdesc='Description of ${name}'
+    \\      depends=('dependency-${name}')
+    \\      touch \"\$startdir/packaged\"
+    \\      mkdir -p \"\$pkgdir\"
+    \\      emit
+    \\    }"
+    \\  done
+    \\}
+    \\main
+;
+
+test "PackageBuilder issue 1981 generated functions supply SRCINFO and split artifacts" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const all = [_][]const u8{ "generated-one", "generated-two" };
+    for ([_][]const []const u8{ &all, all[1..] }) |requested| {
+        var fixture = try Fixture.createMany(allocator, generated_split_fixture, requested, null);
+        defer fixture.destroy();
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = generated_split_fixture });
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+        defer allocator.free(path);
+        fixture.builder.options.pkgbuild_path = path;
+        var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, generated_split_fixture, fixture.package_builds);
+        defer review.deinit();
+        fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+        var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+        defer operation.finish(.success);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+        for (all) |name| {
+            const expected = try std.fmt.allocPrint(
+                allocator,
+                "pkgname = {s}\n\tpkgdesc = Description of {s}\n\tdepends = dependency-{s}\n",
+                .{ name, name, name },
+            );
+            defer allocator.free(expected);
+            try testing.expect(std.mem.indexOf(u8, output.written(), expected) != null);
+        }
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "packaged", .{}));
+        const artifacts = try fixture.builder.runWithOperation(&operation);
+        defer builder_mod.deinitArtifacts(allocator, artifacts);
+        try testing.expectEqual(requested.len, artifacts.len);
+        for (requested, artifacts) |name, artifact| {
+            const relative = try std.fmt.allocPrint(allocator, "pkg/{s}/member", .{name});
+            defer allocator.free(relative);
+            const member = try fixture.temporary.dir.readFileAlloc(io, relative, allocator, .unlimited);
+            defer allocator.free(member);
+            try testing.expectEqualStrings(name, std.mem.trimEnd(u8, member, "\n"));
+            const info = try readPkgInfo(allocator, artifact.path);
+            defer allocator.free(info);
+            const dependency = try std.fmt.allocPrint(allocator, "depend = dependency-{s}\n", .{name});
+            defer allocator.free(dependency);
+            try testing.expect(std.mem.indexOf(u8, info, dependency) != null);
+        }
+    }
+}
+
+test "PackageBuilder issue 1981 removed split functions remain missing" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content = generated_split_fixture ++ "\nunset -f package_generated-two\n";
+    var fixture = try Fixture.createMany(allocator, content, &.{ "generated-one", "generated-two" }, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.failed);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try testing.expectError(error.MissingSplitPackageFunction, fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer));
+    try testing.expectEqual(@as(usize, 0), output.written().len);
+}
+
+test "PackageBuilder issue 1981 refreshes generated definitions after pkgver" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        generated_split_fixture ++ "\npkgver() { printf '2\\n'; }\n",
+        "dependency-${name}",
+        "dependency-${name}=$pkgver",
+    );
+    defer allocator.free(content);
+    var fixture = try Fixture.createMany(allocator, content, &.{ "generated-one", "generated-two" }, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.success);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "pkgver = 2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "depends = dependency-generated-one=2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "depends = dependency-generated-two=2\n") != null);
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "packaged", .{}));
+}
+
+test "PackageBuilder issue 1981 generated auxiliary files require review" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        generated_split_fixture,
+        "depends=('dependency-${name}')",
+        "depends=('dependency-${name}'); install=generated.install",
+    );
+    defer allocator.free(content);
+    var fixture = try Fixture.createMany(allocator, content, &.{ "generated-one", "generated-two" }, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "generated.install", .data = "post_install() { :; }\n" });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.failed);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try testing.expectError(error.ReviewedPkgbuildChanged, fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer));
+    try testing.expectEqual(@as(usize, 0), output.written().len);
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "packaged", .{}));
+}
+
+test "PackageBuilder issue 1981 executes large generated function snapshots" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    // A single shell argument is limited to about 128 KiB on Linux. Valid
+    // split bases can exceed this once all generated functions are captured.
+    const content = generated_split_fixture ++
+        \\
+        \\printf -v padding '%140000s' ''
+        \\eval "large_helper() { : '$padding'; }"
+        \\unset padding
+    ;
+    var fixture = try Fixture.createMany(allocator, content, &.{"generated-one"}, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
 }

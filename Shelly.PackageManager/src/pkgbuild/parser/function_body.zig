@@ -3,6 +3,16 @@ const std = @import("std");
 const shell_scan = @import("shell_scan.zig");
 const PkgbuildParser = @import("parser.zig").PkgbuildParser;
 
+/// Resolve from the authoritative reviewed snapshot when supplied. In
+/// particular, do not resurrect a static declaration removed with unset -f.
+pub fn resolved_function_body(self: PkgbuildParser, content: []const u8, name: []const u8) !?[]const u8 {
+    if (self.dynamic_functions) |functions| {
+        const definition = functions.get(name) orelse return null;
+        return extract_function_body(definition, name);
+    }
+    return extract_function_body(content, name);
+}
+
 pub fn selected_package_body(self: PkgbuildParser, content: []const u8) !?[]const u8 {
     return selected_package_body_with_vars(self, content, null);
 }
@@ -26,7 +36,7 @@ pub fn selected_package_body_with_vars(
     // package member is selected.
     if (self.selected_package_name == null) return null;
     if (try selected_scoped_package_body(self, content, vars)) |body| return body;
-    return try extract_function_body(content, "package");
+    return try resolved_function_body(self, content, "package");
 }
 
 /// Like selected_package_body_with_vars, but does not fall back to package().
@@ -45,14 +55,25 @@ pub fn selected_scoped_package_body(
     );
     defer self.allocator.free(function_name);
 
+    if (self.dynamic_functions) |functions| {
+        const definition = functions.get(function_name) orelse return null;
+        // CachyOS wrappers embed a private helper declaration then call it.
+        // Preserve their existing metadata projection, using the helper frozen
+        // into this evaluated wrapper rather than a stale source declaration.
+        if (vars) |values| if (values.get("pkgbase")) |pkgbase| {
+            if (try generated_helper_body(self, content, definition, package_name, pkgbase)) |body| return body;
+        };
+        return extract_function_body(definition, function_name);
+    }
     if (try extract_function_body(content, function_name)) |body| return body;
     const pkgbase = (vars orelse return null).get("pkgbase") orelse return null;
-    return try generated_helper_body(self, content, package_name, pkgbase);
+    return try generated_helper_body(self, content, content, package_name, pkgbase);
 }
 
 fn generated_helper_body(
     self: PkgbuildParser,
     content: []const u8,
+    definitions: []const u8,
     package_name: []const u8,
     pkgbase: []const u8,
 ) !?[]const u8 {
@@ -66,7 +87,7 @@ fn generated_helper_body(
     const suffix = package_name[pkgbase.len..];
     const helper_name = try std.fmt.allocPrint(self.allocator, "_package{s}", .{suffix});
     defer self.allocator.free(helper_name);
-    return try extract_function_body(content, helper_name);
+    return try extract_function_body(definitions, helper_name);
 }
 
 fn has_generated_helper_dispatch(content: []const u8) bool {

@@ -525,6 +525,7 @@ pub const PackageBuilder = struct {
             final_pkgbuild,
             .{
                 .package_carch = self.shellybuild_config.build.carch,
+                .dynamic_functions = &evaluated.functions,
                 .dynamic_overrides = if (evaluated.scalars.count() > 0) &evaluated.scalars else null,
                 .dynamic_unsets = if (evaluated.unset_scalars.count() > 0) &evaluated.unset_scalars else null,
                 .dynamic_array_overrides = &evaluated.arrays,
@@ -763,7 +764,7 @@ pub const PackageBuilder = struct {
     }
 
     /// Sources the reviewed PKGBUILD in the sandbox and reparses it with the
-    /// resulting scalar and indexed-array state. This makes
+    /// resulting scalar, indexed-array, and function state. This makes
     /// source acquisition and lifecycle steps share one coherent top-level
     /// shell state. Replaces `package_builds` contents in place.
     fn resolveEvaluatedBuilds(
@@ -779,6 +780,7 @@ pub const PackageBuilder = struct {
             if (evaluated.unset_arrays.count() > 0) &evaluated.unset_arrays else null,
         );
         try self.reparseEvaluatedBuilds(
+            &evaluated.functions,
             if (evaluated.scalars.count() > 0) &evaluated.scalars else null,
             if (evaluated.unset_scalars.count() > 0) &evaluated.unset_scalars else null,
             &evaluated.arrays,
@@ -913,6 +915,7 @@ pub const PackageBuilder = struct {
 
     fn reparseEvaluatedBuilds(
         self: *PackageBuilder,
+        functions: *const std.StringHashMap([]const u8),
         overrides: ?*const std.StringHashMap([]const u8),
         unset_overrides: ?*const steps.DynamicScalarUnsets,
         array_overrides: ?*const steps.DynamicArrayOverrides,
@@ -935,6 +938,7 @@ pub const PackageBuilder = struct {
                     .io = self.io,
                     .selected_package_name = requested_name,
                     .package_carch = self.shellybuild_config.build.carch,
+                    .dynamic_functions = functions,
                     .dynamic_overrides = overrides,
                     .dynamic_unsets = unset_overrides,
                     .dynamic_array_overrides = array_overrides,
@@ -959,6 +963,7 @@ pub const PackageBuilder = struct {
                 .io = self.io,
                 .selected_package_name = requested_name,
                 .package_carch = self.shellybuild_config.build.carch,
+                .dynamic_functions = functions,
                 .dynamic_overrides = overrides,
                 .dynamic_unsets = unset_overrides,
                 .dynamic_array_overrides = array_overrides,

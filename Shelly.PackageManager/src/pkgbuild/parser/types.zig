@@ -310,7 +310,8 @@ pub const dynamic_array_assignment = struct {
 /// execution_plan because it runs before source extraction.
 pub const execution_step = struct {
     name: []const u8,
-    /// The function body exactly as written in the PKGBUILD.
+    /// The static function body, or a quoted call to an evaluated function
+    /// whose complete declaration is owned by the execution plan.
     body: []const u8,
     /// `body` with every statically knowable variable expanded: PKGBUILD
     /// assignments plus the makepkg built-ins that are known at parse time
@@ -318,7 +319,7 @@ pub const execution_step = struct {
     /// resolve (command substitutions, loop variables, unknown names) are
     /// left untouched for the shell, and single-quoted, backslash-escaped,
     /// and quoted-heredoc regions are preserved verbatim to match bash
-    /// expansion rules.
+    /// expansion rules. Evaluated functions retain the quoted call unchanged.
     expanded_body: []const u8,
     pub fn deinit(self: execution_step, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
