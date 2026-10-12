@@ -9,6 +9,7 @@ const dependencies = @import("../pkgbuild/parser/dependencies.zig");
 const PkgbuildParser = pkgbuild_parser.PkgbuildParser;
 
 pub const GenerateOptions = struct {
+    dynamic_functions: ?*const std.StringHashMap([]const u8) = null,
     package_carch: []const u8 = "x86_64",
     dynamic_overrides: ?*const std.StringHashMap([]const u8) = null,
     dynamic_unsets: ?*const std.StringHashMap(void) = null,
@@ -169,6 +170,7 @@ fn parserFor(
         .io = io,
         .selected_package_name = selected_package_name,
         .package_carch = options.package_carch,
+        .dynamic_functions = options.dynamic_functions,
         .dynamic_overrides = options.dynamic_overrides,
         .dynamic_unsets = options.dynamic_unsets,
         .dynamic_array_overrides = options.dynamic_array_overrides,

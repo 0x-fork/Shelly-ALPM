@@ -378,7 +378,7 @@ pub fn build(b: *std.Build) void {
     const builder_tests = b.addTest(.{
         .name = "builder-test",
         .root_module = mod,
-        .filters = &.{"PackageBuilder"},
+        .filters = &.{ "PackageBuilder", "dynamic function output" },
     });
     const run_builder_tests = b.addRunArtifact(builder_tests);
     const builder_test_step = b.step("builder-test", "Run native package builder regressions");
@@ -486,6 +486,9 @@ pub fn build(b: *std.Build) void {
             "parser_content: issue 1750 source command substitution is deferred and overridden",
             "parser_content: dynamic source keeps assignment and architecture append ordering",
             "parser_content: conditional source integrity arrays are deferred as one family",
+            "PackageBuilder issue 1981",
+            "PackageBuilder supports CachyOS generated split package functions",
+            "dynamic function output",
             "PackageBuilder resolves issue 1750 source command substitution after review",
             "PackageBuilder evaluates conditional source and checksum arrays atomically",
             "PackageBuilder preserves issue 1891",
@@ -848,6 +851,9 @@ pub fn build(b: *std.Build) void {
             "PackageBuilder SRCINFO failures",
             "non-root builder guard rejects root effective uid",
             "PackageBuilder rejects a PKGBUILD changed after review",
+            "PackageBuilder issue 1981",
+            "PackageBuilder supports CachyOS generated split package functions",
+            "dynamic function output",
             "PackageBuilder resolves issue 1750 source command substitution after review",
             "PackageBuilder preserves issue 1891",
             "PackageBuilder preserves generic shell-created scalar defaults for lifecycle steps",
