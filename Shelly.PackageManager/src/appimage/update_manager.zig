@@ -2912,13 +2912,25 @@ test "update: failed database commit rolls back binary and desktop" {
     defer std.testing.allocator.free(current_path);
     const old_binary = "#!/bin/sh\nold-binary\nexit 0\n";
     try writeUpdateFixture(std.testing.io, current_path, old_binary);
+    {
+        var installed_file = try std.Io.Dir.cwd().openFile(std.testing.io, current_path, .{});
+        defer installed_file.close(std.testing.io);
+        try installed_file.setPermissions(std.testing.io, .fromMode(0o755));
+    }
+    const original_stat = try std.Io.Dir.cwd().statFile(std.testing.io, current_path, .{});
+    try std.testing.expect(original_stat.permissions.toMode() & 0o111 != 0);
 
     const desktop_dir = try std.fs.path.join(std.testing.allocator, &.{ data_home, "applications" });
     defer std.testing.allocator.free(desktop_dir);
     try std.Io.Dir.cwd().createDirPath(std.testing.io, desktop_dir);
     const desktop_path = try std.fs.path.join(std.testing.allocator, &.{ desktop_dir, "editor.desktop" });
     defer std.testing.allocator.free(desktop_path);
-    const old_desktop = "[Desktop Entry]\nName=Old Name\nExec=old-binary\n";
+    const old_desktop = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "[Desktop Entry]\nType=Application\nName=Old Name\nExec={s}\nTryExec={s}\n",
+        .{ current_path, current_path },
+    );
+    defer std.testing.allocator.free(old_desktop);
     try writeUpdateFixture(std.testing.io, desktop_path, old_desktop);
 
     try seedDb(std.testing.allocator, std.testing.io, db_path, &.{
@@ -2944,6 +2956,10 @@ test "update: failed database commit rolls back binary and desktop" {
     const installed_binary = try readUpdateFile(std.testing.allocator, std.testing.io, current_path);
     defer std.testing.allocator.free(installed_binary);
     try std.testing.expectEqualStrings(old_binary, installed_binary);
+
+    // TryExec must still point to an executable after rollback, or menus hide the app.
+    const restored_stat = try std.Io.Dir.cwd().statFile(std.testing.io, current_path, .{});
+    try std.testing.expectEqual(original_stat.permissions.toMode(), restored_stat.permissions.toMode());
 
     // Desktop file should be the original.
     const installed_desktop = try readUpdateFile(std.testing.allocator, std.testing.io, desktop_path);

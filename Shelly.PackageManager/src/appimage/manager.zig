@@ -201,6 +201,8 @@ pub const AppImageManager = struct {
             try writer.interface.writeAll(read_buf[0..n]);
         }
         try writer.interface.flush();
+        // Preserve executable permissions before atomic replacement or rollback.
+        try dst.setPermissions(self.io, (try src.stat(self.io)).permissions);
         try dst.sync(self.io);
         operation_scope.finish(.success);
     }
@@ -3217,6 +3219,12 @@ test "syncAppImageMeta relocates executable files and repairs previously broken 
         if (recover) {
             try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture.manager.install_directory);
             try fixture.manager.copyFile(fixture.old_path, fixture.new_path);
+            // Reproduce the non-executable copy left by older Shelly versions.
+            {
+                var legacy_copy = try std.Io.Dir.cwd().openFile(std.testing.io, fixture.new_path, .{});
+                defer legacy_copy.close(std.testing.io);
+                try legacy_copy.setPermissions(std.testing.io, .fromMode(0o644));
+            }
             try std.Io.Dir.cwd().deleteFile(std.testing.io, fixture.old_path);
             const stat = try std.Io.Dir.cwd().statFile(std.testing.io, fixture.new_path, .{});
             try std.testing.expectEqual(@as(u32, 0), stat.permissions.toMode() & 0o111);
