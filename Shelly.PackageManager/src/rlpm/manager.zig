@@ -406,7 +406,20 @@ pub const Manager = struct {
         var native_flags = try rlpm.TransactionFlags.fromBits(@bitCast(flags));
         native_flags.no_hooks = native_flags.no_hooks or self.hooks_disabled;
         if (flags.dbonly) native_flags.no_dependencies = true;
-        const tx = try self.owner.initializeTransaction(self.io(), native_flags);
+        const tx = self.owner.initializeTransaction(self.io(), native_flags) catch |err| {
+            // Publish before deferred cleanup detaches the operation. The facade
+            // reduces lock errors to TransInitFailed, losing their context.
+            if (err != error.Cancelled and self.dispatcher.errorGeneration() == error_generation) {
+                const diagnostics = @import("diagnostics");
+                const message = (if (err == error.DatabaseLocked or err == error.LockExists)
+                    diagnostics.databaseLocked(self.allocator, self.owner.options().database_path)
+                else
+                    diagnostics.format(self.allocator, err, .{ .operation = "the RLPM transaction" })) catch null;
+                defer if (message) |value| self.allocator.free(value);
+                self.dispatcher.raiseError(.{ .message = message orelse @errorName(err) });
+            }
+            return @as(anyerror!void, err);
+        };
         var transaction_active = true;
         defer if (transaction_active) self.owner.releaseTransaction() catch unreachable;
         errdefer |err| operation.finish(if (err == error.Cancelled) .cancelled else .failed);
