@@ -17,6 +17,7 @@ const support_packages = @import("../services/support_packages.zig");
 const runtime = @import("../services/runtime.zig");
 const systemd_tray = @import("../services/systemd_tray.zig");
 const tray_service = @import("../services/tray_service.zig");
+const icon_fetcher = @import("../services/icon_fetcher.zig");
 const support = @import("support.zig");
 const datetime = @import("../helpers/datetime.zig");
 const ShellyWindow = @import("../shelly_window.zig").ShellyWindow;
@@ -342,6 +343,11 @@ pub const ShellySettingsPage = extern struct {
         self.priv().toast.show(.success, translations._("Settings saved"));
     }
 
+    fn applyIconsToggle(previous: bool, current: bool) void {
+        if (previous == current or !features.builtWithBackgroundServices) return;
+        icon_fetcher.downloadIconsInBackground(std.heap.c_allocator, runtime.io, current);
+    }
+
     fn save(self: *Self) !void {
         const p = self.priv();
         const svc = obtainConfigService() catch return;
@@ -352,8 +358,10 @@ pub const ShellySettingsPage = extern struct {
 
         var updated = cfg.*;
         collectIntoConfig(p, arena.allocator(), &updated);
+        const icons_enabled_before = cfg.ShellyIconsEnabled;
         try svc.set(updated);
         try svc.save();
+        applyIconsToggle(icons_enabled_before, updated.ShellyIconsEnabled);
 
         const lang_value = language_entries[gtk.DropDown.getSelected(p.language_drop)].value;
         _ = translations.initWithLocale(lang_value);
@@ -384,6 +392,7 @@ pub const ShellySettingsPage = extern struct {
 
         var updated = cfg.*;
         collectIntoConfig(p, arena.allocator(), &updated);
+        const icons_enabled_before = cfg.ShellyIconsEnabled;
 
         const page_drop_stale =
             updated.RecommendedEnabled != cfg.RecommendedEnabled or
@@ -401,6 +410,7 @@ pub const ShellySettingsPage = extern struct {
             p.toast.show(.@"error", translations._("Could not save settings to the configured file. Your latest changes were not saved."));
             return;
         };
+        applyIconsToggle(icons_enabled_before, updated.ShellyIconsEnabled);
 
         const lang_value = language_entries[gtk.DropDown.getSelected(p.language_drop)].value;
         _ = translations.initWithLocale(lang_value);

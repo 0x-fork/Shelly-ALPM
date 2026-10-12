@@ -333,10 +333,14 @@ pub const PackagePage = extern struct {
                 gtk.Widget.setVisible(installed_w, @intFromBool(pkg.isInstalled()));
 
                 const p = page.priv();
-                if (p.resolver.resolve(pkg.getName())) |path| {
-                    gtk.Image.setFromFile(icon, path);
-                } else {
-                    gtk.Image.setFromIconName(icon, "package-x-generic-symbolic");
+                const icons_on = runtime.shellyIconsEnabled();
+                gtk.Widget.setVisible(icon_w, @intFromBool(icons_on));
+                if (icons_on) {
+                    if (p.resolver.resolve(pkg.getName())) |path| {
+                        gtk.Image.setFromFile(icon, path);
+                    } else {
+                        gtk.Image.setFromIconName(icon, "package-x-generic-symbolic");
+                    }
                 }
             }
         };
@@ -532,10 +536,14 @@ pub const PackagePage = extern struct {
                 gobject.Object.setData(selection_check.as(gobject.Object), "syncing", null);
 
                 const p = page.priv();
-                if (p.resolver.resolve(pkg.getName())) |path| {
-                    gtk.Image.setFromFile(icon_image, path);
-                } else {
-                    gtk.Image.setFromIconName(icon_image, "package-x-generic");
+                const icons_on = runtime.shellyIconsEnabled();
+                gtk.Widget.setVisible(icon_image.as(gtk.Widget), @intFromBool(icons_on));
+                if (icons_on) {
+                    if (p.resolver.resolve(pkg.getName())) |path| {
+                        gtk.Image.setFromFile(icon_image, path);
+                    } else {
+                        gtk.Image.setFromIconName(icon_image, "package-x-generic");
+                    }
                 }
                 var name_buf: [256]u8 = undefined;
                 const markup = std.fmt.bufPrintZ(&name_buf, "<b>{s}</b>", .{pkg.getName()}) catch pkg.getName();
@@ -800,7 +808,7 @@ pub const PackagePage = extern struct {
         arena_ptr.* = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         const alloc = arena_ptr.allocator();
         const p = page.priv();
-        if (!p.resolver.loaded) {
+        if (runtime.shellyIconsEnabled() and !p.resolver.loaded) {
             p.resolver.load(runtime.io, runtime.environ_map) catch {};
         }
         var threaded: std.Io.Threaded = .init(alloc, .{});

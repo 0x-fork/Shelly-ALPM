@@ -206,6 +206,67 @@ test "native backend missing backup members match libalpm and preserve unrelated
     }
 }
 
+test "native backend local install reports the configured database lock before completion" {
+    for ([_]pm.Manager.Backend{ .libalpm, .rlpm }) |backend| {
+        if (backend == .libalpm and !pm.Manager.libalpm_enabled) continue;
+        var fixture = try Fixture.init(backend);
+        defer fixture.deinit();
+        // Exercise both spaces and shell quotes in a non-default DBPath.
+        const database_directory = "package's database";
+        try fixture.temp.dir.createDirPath(t.io, database_directory);
+        fixture.options.database_path = try std.fs.path.join(fixture.arena.allocator(), &.{
+            std.fs.path.dirname(fixture.options.database_path.?).?, database_directory,
+        });
+        var context = pm.OperationContext.init(t.allocator, t.io);
+        defer context.deinit();
+        fixture.options.operation_context = &context;
+        const expected = try pm.user_errors.databaseLocked(t.allocator, fixture.options.database_path.?);
+        defer t.allocator.free(expected);
+        const Capture = struct {
+            expected: []const u8,
+            failures: usize = 0,
+            completions: usize = 0,
+            detailed: bool = false,
+            failure_before_completion: bool = false,
+            failed: bool = false,
+
+            fn event(data: ?*anyopaque, value: pm.OperationEvent) void {
+                const self: *@This() = @ptrCast(@alignCast(data.?));
+                switch (value) {
+                    .failure => |failure| {
+                        self.failures += 1;
+                        self.detailed = std.mem.indexOf(u8, failure.message, self.expected) != null;
+                        self.failure_before_completion = self.completions == 0;
+                    },
+                    .completed => |completion| {
+                        self.completions += 1;
+                        self.failed = completion.status == .failed;
+                    },
+                    else => {},
+                }
+            }
+        };
+        var capture: Capture = .{ .expected = expected };
+        const manager = try fixture.manager();
+        defer manager.deinit();
+        const subscription = try context.subscribe(.{ .function = Capture.event, .data = &capture });
+        defer _ = context.unsubscribe(subscription);
+        const lock_path = try std.fs.path.join(fixture.arena.allocator(), &.{ database_directory, "db.lck" });
+        try fixture.temp.dir.writeFile(t.io, .{ .sub_path = lock_path, .data = "foreign lock" });
+
+        try t.expectError(error.TransInitFailed, manager.install_local_packages(&.{fixture.archive}, .{ .nohooks = true, .noscriptlet = true }));
+
+        try t.expectEqual(@as(usize, 1), capture.failures);
+        try t.expect(capture.detailed);
+        try t.expect(capture.failure_before_completion);
+        try t.expectEqual(@as(usize, 1), capture.completions);
+        try t.expect(capture.failed);
+        const lock_contents = try fixture.temp.dir.readFileAlloc(t.io, lock_path, t.allocator, .limited(100));
+        defer t.allocator.free(lock_contents);
+        try t.expectEqualStrings("foreign lock", lock_contents);
+    }
+}
+
 test "native backend switching reopens compatible state and respects the shared lock" {
     if (!pm.Manager.libalpm_enabled) return;
     for ([_]pm.Manager.Backend{ .libalpm, .rlpm }) |first| {

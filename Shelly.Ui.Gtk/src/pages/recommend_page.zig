@@ -121,7 +121,7 @@ pub const RecommendPage = extern struct {
         const alloc = arena_ptr.allocator();
 
         const p = page.priv();
-        if (!p.resolver.loaded) {
+        if (runtime.shellyIconsEnabled() and !p.resolver.loaded) {
             p.resolver.load(runtime.io, runtime.environ_map) catch {};
         }
 
@@ -271,16 +271,18 @@ pub const RecommendPage = extern struct {
         gtk.Widget.setMarginEnd(content.as(gtk.Widget), 10);
         gtk.Widget.setHexpand(content.as(gtk.Widget), 1);
 
-        const image = gtk.Image.new();
-        if (p.resolver.resolve(pkg.Name)) |path| {
-            gtk.Image.setFromFile(image, path);
-        } else {
-            gtk.Image.setFromIconName(image, "package-x-generic");
+        if (runtime.shellyIconsEnabled()) {
+            const image = gtk.Image.new();
+            if (p.resolver.resolve(pkg.Name)) |path| {
+                gtk.Image.setFromFile(image, path);
+            } else {
+                gtk.Image.setFromIconName(image, "package-x-generic");
+            }
+            gtk.Image.setPixelSize(image, 48);
+            gtk.Widget.setValign(image.as(gtk.Widget), .center);
+            gtk.Widget.addCssClass(image.as(gtk.Widget), "icon-dropshadow");
+            gtk.Box.append(content, image.as(gtk.Widget));
         }
-        gtk.Image.setPixelSize(image, 48);
-        gtk.Widget.setValign(image.as(gtk.Widget), .center);
-        gtk.Widget.addCssClass(image.as(gtk.Widget), "icon-dropshadow");
-        gtk.Box.append(content, image.as(gtk.Widget));
 
         const text_box = gtk.Box.new(.vertical, 0);
         gtk.Widget.setHalign(text_box.as(gtk.Widget), .start);
