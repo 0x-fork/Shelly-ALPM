@@ -2321,15 +2321,18 @@ pub const Manager = struct {
         downloader_instance.quiet = true;
         if (self.dispatcher.operation) |operation| downloader_instance.setParentOperation(operation) else downloader_instance.setOperationContext(self.operation_context);
         downloader_instance.setEventCallback(onDownloadEvent, self);
-        const dest = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.config.cache_directory, package.file_name() }) catch return;
+        const dest = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.config.cache_directory, package.file_name() }) catch return error.FileError;
         defer self.allocator.free(dest);
-        const sig_dest = std.fmt.allocPrint(self.allocator, "{s}.sig", .{dest}) catch return;
+        const sig_dest = std.fmt.allocPrint(self.allocator, "{s}.sig", .{dest}) catch return error.FileError;
         defer self.allocator.free(sig_dest);
 
         var download_scope = MirrorDownloadScope.init(self, dest);
         defer download_scope.finish();
         download_scope.attach(&downloader_instance);
 
+        const signature_level = libalpm.SigLevel.from_sig_level(@bitCast(database.sigLevel()));
+        const signature_may_be_missing = !signature_level.package or signature_level.package_optional or
+            rawLibalpm.alpm_pkg_get_base64_sig(package.ptr) != null;
         var last_failure: ?downloader.DownloadError = null;
         for ([_]@TypeOf(database.servers()){ database.cacheServers(), database.servers() }) |list| {
             var urls = list;
@@ -2338,14 +2341,40 @@ pub const Manager = struct {
                 defer self.allocator.free(file_url);
 
                 download_scope.beginAttempt();
+                var pair_complete = false;
+                defer if (!pair_complete) {
+                    std.Io.Dir.cwd().deleteFile(self.io(), dest) catch {};
+                    std.Io.Dir.cwd().deleteFile(self.io(), sig_dest) catch {};
+                };
                 switch (downloader_instance.downloadToFile(file_url, dest, true)) {
                     .succes => {
+                        // Never retain a signature from a previous package or mirror.
+                        std.Io.Dir.cwd().deleteFile(self.io(), sig_dest) catch |err| switch (err) {
+                            error.FileNotFound => {},
+                            else => return error.FileError,
+                        };
                         const sig_url = std.fmt.allocPrint(self.allocator, "{s}.sig", .{file_url}) catch return downloader.DownloadError.InvalidUrl;
                         defer self.allocator.free(sig_url);
                         downloader_instance.quiet = true;
                         const signature_result = downloader_instance.downloadToFile(sig_url, sig_dest, true);
-                        downloader_instance.quiet = false;
-                        try propagateSignatureCancellation(signature_result);
+                        switch (signature_result) {
+                            .succes => {},
+                            .skipped => {
+                                last_failure = error.FailedDownload;
+                                continue;
+                            },
+                            .failure => |err| {
+                                if (err == error.Cancelled) return err;
+                                if (err != error.NotFound or !signature_may_be_missing) {
+                                    last_failure = err;
+                                    // Retry the whole pair on the next mirror. The
+                                    // forced package download must not reuse bytes
+                                    // from the mirror whose signature failed.
+                                    continue;
+                                }
+                            },
+                        }
+                        pair_complete = true;
                         download_scope.succeed();
                         return;
                     },
@@ -3290,10 +3319,123 @@ fn databaseDownloadConfiguration(
     return config;
 }
 
-fn propagateSignatureCancellation(result: downloader.DownloadResult) downloader.DownloadError!void {
-    switch (result) {
-        .failure => |err| if (err == downloader.DownloadError.Cancelled) return err,
-        else => {},
+test "package signature failures retry the complete mirror pair (issue 2034)" {
+    const Case = struct {
+        policy: []const u8 = "Required DatabaseNever",
+        first_missing: bool = false,
+        second_fails: bool = false,
+        embedded: bool = false,
+        cancel: bool = false,
+        expected_error: ?downloader.DownloadError = null,
+        expected_attempts: usize = 2,
+    };
+    const cases = [_]Case{
+        .{}, // A non-file signature produces FileError after the package succeeds.
+        .{ .first_missing = true }, // Required signature missing on first mirror.
+        .{ .second_fails = true, .expected_error = error.FileError },
+        .{ .first_missing = true, .second_fails = true, .expected_error = error.NotFound },
+        .{ .policy = "Optional DatabaseNever", .first_missing = true, .expected_attempts = 1 },
+        .{ .policy = "Never", .first_missing = true, .expected_attempts = 1 },
+        .{ .embedded = true, .first_missing = true, .expected_attempts = 1 },
+        .{ .cancel = true, .expected_error = error.Cancelled, .expected_attempts = 1 },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const io = testing.io;
+        var temporary = testing.tmpDir(.{});
+        defer temporary.cleanup();
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path_length = try temporary.dir.realPath(io, &path_buffer);
+        const root = path_buffer[0..path_length];
+        for ([_][]const u8{ "db/sync", "cache", "first", "second" }) |directory|
+            try temporary.dir.createDirPath(io, directory);
+
+        const filename = "fixture-1-1-any.pkg.tar.zst";
+        const signature = filename ++ ".sig";
+        try temporary.dir.writeFile(io, .{ .sub_path = "first/" ++ filename, .data = "first mirror archive" });
+        try temporary.dir.writeFile(io, .{ .sub_path = "second/" ++ filename, .data = "second mirror archive" });
+        if (!case.first_missing) try temporary.dir.createDirPath(io, "first/" ++ signature);
+        if (!case.second_fails) {
+            try temporary.dir.writeFile(io, .{ .sub_path = "second/" ++ signature, .data = "second mirror signature" });
+        } else if (!case.first_missing) {
+            try temporary.dir.createDirPath(io, "second/" ++ signature);
+        }
+        // A failed attempt and an allowed missing signature must both clear this.
+        try temporary.dir.writeFile(io, .{ .sub_path = "cache/" ++ signature, .data = "stale signature" });
+
+        {
+            var file = try temporary.dir.createFile(io, "db/sync/fixture.db", .{});
+            defer file.close(io);
+            var buffer: [4096]u8 = undefined;
+            var writer = file.writer(io, &buffer);
+            var tar: std.tar.Writer = .{ .underlying_writer = &writer.interface };
+            const desc = "%FILENAME%\n" ++ filename ++ "\n\n%NAME%\nfixture\n\n%VERSION%\n1-1\n\n%ARCH%\nany\n\n";
+            try tar.writeFileBytes("fixture-1-1/desc", if (case.embedded)
+                desc ++ "%PGPSIG%\nZmFrZQ==\n\n"
+            else
+                desc, .{ .mode = 0o644 });
+            try tar.finishPedantically();
+            try writer.interface.flush();
+        }
+        const config = try std.fmt.allocPrint(allocator, "[options]\nArchitecture = auto\nSigLevel = {s}\nDBPath = {s}/db\nCacheDir = {s}/cache\n" ++
+            "[fixture]\nServer = file://{s}/first\nServer = file://{s}/second\n", .{ case.policy, root, root, root, root });
+        try temporary.dir.writeFile(io, .{ .sub_path = "pacman.conf", .data = config });
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/pacman.conf", .{root});
+        const mgr = try Manager.init(testing.allocator, testing.environ, .{ .config_path = config_path });
+        defer mgr.deinit();
+        const db = rawLibalpm.alpm_get_syncdbs(mgr.handle).*.data.?;
+        const database: libalpm.Database = .{ .ptr = @ptrCast(@alignCast(db)) };
+        const package: libalpm.Package = .{ .ptr = rawLibalpm.alpm_db_get_pkg(database.ptr, "fixture") orelse return error.MissingFixture };
+        const Observer = struct {
+            attempts: usize = 0,
+            completed: usize = 0,
+            failed: usize = 0,
+            context: ?*operation_api.OperationContext,
+            fn receive(data: ?*anyopaque, event: events.DownloadUpdate) void {
+                const self: *@This() = @ptrCast(@alignCast(data.?));
+                switch (event.state) {
+                    .started, .retry => self.attempts += 1,
+                    .completed => self.completed += 1,
+                    .failed => self.failed += 1,
+                    .progress => if (self.context) |context| {
+                        context.cancel();
+                    },
+                    else => {},
+                }
+            }
+        };
+        var context = operation_api.OperationContext.init(testing.allocator, mgr.io());
+        defer context.deinit();
+        mgr.setOperationContext(&context);
+        var observer: Observer = .{ .context = if (case.cancel) &context else null };
+        _ = try mgr.dispatcher.addDownloadHandler(.{ .function = Observer.receive, .data = &observer });
+        var errors: ErrorCapture = .{};
+        _ = try mgr.dispatcher.addErrorHandler(.{ .function = captureError, .data = &errors });
+        // Exercise actual downloads without committing these deliberately fake archives.
+        if (case.expected_error) |expected| {
+            try testing.expectError(expected, mgr.download_package(package, database));
+            try testing.expectEqual(@as(usize, 0), observer.completed);
+            try testing.expectEqual(@as(usize, 1), observer.failed);
+            try testing.expectError(error.FileNotFound, temporary.dir.access(io, "cache/" ++ filename, .{}));
+            try testing.expectError(error.FileNotFound, temporary.dir.access(io, "cache/" ++ signature, .{}));
+            if (!case.cancel) try testing.expect(errors.len != 0);
+        } else {
+            try mgr.download_package(package, database);
+            try testing.expectEqual(@as(usize, 1), observer.completed);
+            try testing.expectEqual(@as(usize, 0), observer.failed);
+            try testing.expectEqual(@as(usize, 0), errors.len);
+            const archive_bytes = try temporary.dir.readFileAlloc(io, "cache/" ++ filename, allocator, .limited(1024));
+            try testing.expectEqualStrings(if (case.expected_attempts == 2) "second mirror archive" else "first mirror archive", archive_bytes);
+            if (case.expected_attempts == 2) {
+                const signature_bytes = try temporary.dir.readFileAlloc(io, "cache/" ++ signature, allocator, .limited(1024));
+                try testing.expectEqualStrings("second mirror signature", signature_bytes);
+            } else {
+                try testing.expectError(error.FileNotFound, temporary.dir.access(io, "cache/" ++ signature, .{}));
+            }
+        }
+        try testing.expectEqual(case.expected_attempts, observer.attempts);
     }
 }
 
