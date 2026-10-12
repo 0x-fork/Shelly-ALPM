@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: shelly-ui 2.2.4.1\n"
 "Report-Msgid-Bugs-To: csnyder@seafoam-labs.org\n"
-"POT-Creation-Date: 2026-10-10 05:38+0300\n"
+"POT-Creation-Date: 2026-10-11 18:31-0300\n"
 "PO-Revision-Date: 2026-10-10 15:13+0200\n"
 "Last-Translator: csnyder@seafoam-labs.org\n"
 "Language-Team: csnyder@seafoam-labs.org\n"
@@ -111,6 +111,13 @@ msgstr ""
 
 msgid "Review PKGBUILD"
 msgstr "Esamina PKGBUILD"
+
+#| msgid "Review PKGBUILD"
+msgid "PKGBUILD"
+msgstr ""
+
+msgid "Retry"
+msgstr ""
 
 msgid "Skip"
 msgstr "Salta"
@@ -939,8 +946,23 @@ msgstr "da scaricare"
 msgid "net"
 msgstr "netti"
 
+msgid "Scanning PKGBUILD…"
+msgstr ""
+
+#| msgid "Permissions unavailable"
+msgid "Security scan unavailable."
+msgstr ""
+
 msgid "Could not load the PKGBUILD preview."
 msgstr "Impossibile caricare l'anteprima del PKGBUILD."
+
+msgid ""
+"PKGBUILD changed. Close and reopen the preview to scan the current version."
+msgstr ""
+
+#| msgid "Flatpak files"
+msgid "No related files."
+msgstr ""
 
 msgid "Previous"
 msgstr "Precedente"
@@ -1766,12 +1788,3 @@ msgstr "Comprimi barra laterale"
 
 msgid "Package"
 msgstr "Pacchetti"
-
-#~ msgid "Filesystem"
-#~ msgstr "Filesystem"
-
-#~ msgid "Sockets"
-#~ msgstr "Socket"
-
-#~ msgid "Shared"
-#~ msgstr "Condivisi"
