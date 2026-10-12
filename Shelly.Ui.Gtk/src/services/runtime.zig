@@ -77,7 +77,6 @@ pub fn takePendingNavigation() ?PendingNavigation {
 
 pub var config: ?*ConfigResolver = null;
 
-/// Whether downloaded package icons should be used. True when settings are unavailable.
 pub fn shellyIconsEnabled() bool {
     const svc = config orelse return true;
     const cfg = svc.get() catch return true;
