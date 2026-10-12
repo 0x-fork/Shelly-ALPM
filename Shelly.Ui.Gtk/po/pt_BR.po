@@ -62,10 +62,10 @@ msgstr "Confirmar"
 
 #| msgid "No description available."
 msgid "Permissions unavailable"
-msgstr ""
+msgstr "Permissões não disponíveis"
 
 msgid "Shelly could not read the permissions for this app."
-msgstr ""
+msgstr "O Shelly não conseguiu ler as permissões para esse app"
 
 msgid "No special permissions requested"
 msgstr "Nenhuma permissão especial solicitada"
@@ -117,7 +117,7 @@ msgid "PKGBUILD"
 msgstr ""
 
 msgid "Retry"
-msgstr ""
+msgstr "Tentar novamente"
 
 msgid "Skip"
 msgstr "Pular"
@@ -176,7 +176,7 @@ msgstr "Ex: dono/repo ou https:// ..."
 
 msgid ""
 "Enter the repository as owner/repo, for example seafoam-labs/shelly-alpm."
-msgstr ""
+msgstr "Informe o repositório no formato proprietário/repositório, por exemplo, seafoam-labs/shelly-alpm."
 
 msgid "Allow Prerelease"
 msgstr "Permitir versões de teste"
@@ -212,7 +212,7 @@ msgstr "Procure na AUR por nome ou palavra-chave"
 
 #| msgid "Search..."
 msgid "Search By"
-msgstr ""
+msgstr "Procurar por"
 
 msgid "Installed Only"
 msgstr "Apenas pacotes instalados"
@@ -221,14 +221,14 @@ msgid "Show only installed packages"
 msgstr "Mostrar apenas pacotes instalados"
 
 msgid "Previous page"
-msgstr ""
+msgstr "Página anterior"
 
 msgid "Page 1 of 1"
-msgstr ""
+msgstr "Página 1 de 1"
 
 #| msgid "Default page"
 msgid "Next page"
-msgstr ""
+msgstr "Próxima Página"
 
 msgid "Additional Options"
 msgstr "Opcões adicionais"
@@ -238,7 +238,7 @@ msgstr "Instalar itens selecionados"
 
 #| msgid "Selected"
 msgid "Select"
-msgstr ""
+msgstr "Selecionar"
 
 msgid "Name"
 msgstr "Nome"
@@ -250,10 +250,10 @@ msgid "Popularity"
 msgstr "Popularidade"
 
 msgid "Loading the AUR index"
-msgstr ""
+msgstr "Carregando o índice AUR"
 
 msgid "Powered by Atoll."
-msgstr ""
+msgstr "Movido pelo Atoll"
 
 msgid "Run checks"
 msgstr "Executar verificações"
@@ -406,7 +406,7 @@ msgstr ""
 
 #| msgid "Optional Depends"
 msgid "Install Optional Deps"
-msgstr ""
+msgstr "Instalar dependências opcionais"
 
 msgid "Reinstall"
 msgstr "Reinstalar"
@@ -656,7 +656,7 @@ msgid "Enable Shelly Search"
 msgstr "Ativar pesquisa Shelly"
 
 msgid "Enable Atoll Powered AUR"
-msgstr ""
+msgstr "Ativar AUR fornecida pelo Atoll"
 
 msgid "AppImage Install Path"
 msgstr "Caminho de instalação das AppImages"
@@ -710,7 +710,7 @@ msgid "Your system is up to date"
 msgstr "Seu sistema está atualizado"
 
 msgid "Could not check for updates."
-msgstr ""
+msgstr "Não foi possível buscar atualizações."
 
 msgid "Utilities"
 msgstr "Utilidades"
@@ -842,25 +842,25 @@ msgstr "Inicializar o Shelly"
 
 #| msgid "System bus"
 msgid "System files"
-msgstr ""
+msgstr "Arquivos do sistema"
 
 msgid "Other folders"
-msgstr ""
+msgstr "Outras pastas"
 
 msgid "Running services"
-msgstr ""
+msgstr "Serviços em execução"
 
 msgid "Other apps' data"
-msgstr ""
+msgstr "Dados de outros aplicativos"
 
 msgid "Home folder"
-msgstr ""
+msgstr "Diretório home"
 
 msgid "User folders"
-msgstr ""
+msgstr "Diretórios de usuário"
 
 msgid "Persistent files"
-msgstr ""
+msgstr "Arquivos persistentes"
 
 msgid "Devices"
 msgstr "Dispositivos"
@@ -873,37 +873,37 @@ msgstr "Bus de sistema"
 
 #| msgid "Network"
 msgid "Network access"
-msgstr ""
+msgstr "Acesso de rede"
 
 msgid "Display server"
-msgstr ""
+msgstr "Servidor gráfico"
 
 msgid "Sandbox features"
-msgstr ""
+msgstr "Funcionalidades de sandbox"
 
 msgid "Environment"
 msgstr "Ambiente"
 
 msgid "Sound"
-msgstr ""
+msgstr "Som"
 
 msgid "Printing"
-msgstr ""
+msgstr "Impressão"
 
 msgid "Inter-process communication"
-msgstr ""
+msgstr "Comunicação interprocessual"
 
 msgid "Other"
 msgstr "Outro"
 
 msgid "No network access"
-msgstr ""
+msgstr "Nenhum acesso de rede"
 
 msgid "No device access"
-msgstr ""
+msgstr "Nenhum acesso de dispositivo"
 
 msgid "No access to system files"
-msgstr ""
+msgstr "Nenhum acesso para arquivos de sistema"
 
 msgid "Review PKGBUILD changes for"
 msgstr "Revise as mudanças para o PKGBUILD"
@@ -939,7 +939,7 @@ msgid "to"
 msgstr "para"
 
 msgid "removed size"
-msgstr ""
+msgstr "tamanho removido"
 
 msgid "download"
 msgstr "baixar"
@@ -948,25 +948,25 @@ msgid "net"
 msgstr ""
 
 msgid "Scanning PKGBUILD…"
-msgstr ""
+msgstr "Escaneando PKGBUILD…"
 
 #| msgid "No description available."
 msgid "Security scan unavailable."
-msgstr ""
+msgstr "Verificação de segurança indisponível."
 
 msgid "Could not load the PKGBUILD preview."
-msgstr ""
+msgstr "Não foi possível carregar a visualização prévia de PKGBUILD"
 
 msgid ""
 "PKGBUILD changed. Close and reopen the preview to scan the current version."
-msgstr ""
+msgstr "O PKGBUILD mudou. Feche e reabra a visualização prévia para escanear a versão atual."
 
 #| msgid "Flatpak files"
 msgid "No related files."
-msgstr ""
+msgstr "Sem arquivos relacionados"
 
 msgid "Previous"
-msgstr ""
+msgstr "Anterior"
 
 msgid "Dismiss"
 msgstr "Ignorar"
@@ -993,12 +993,13 @@ msgid "Version ?"
 msgstr "Versão ?"
 
 msgid "Enter a download URL beginning with http:// or https://."
-msgstr ""
+msgstr "Insira uma URL de download que começa com http:// ou https://."
 
 msgid ""
 "Enter a Forgejo repository URL as http(s)://host/owner/repo or http(s)://"
 "host/owner/repo/releases."
-msgstr ""
+msgstr "Insira uma URL de repositório Forgejo como http(s)://host/dono/repo ou https://"
+"host/dono/repo/releases"
 
 msgid "Choose an AppImage file"
 msgstr "Escolha um arquivo AppImage"
@@ -1007,7 +1008,7 @@ msgid "AppImage files"
 msgstr "Arquivos AppImage"
 
 msgid "Only.AppImage files can be installed"
-msgstr ""
+msgstr "Apenas arquivos .AppImage podem ser instalados"
 
 msgid "Installing AppImage"
 msgstr "Instalando AppImage"
@@ -1054,7 +1055,7 @@ msgid "Operation completed successfully"
 msgstr "Operação concluída com sucesso"
 
 msgid "Could not complete the requested operation."
-msgstr ""
+msgstr "Não foi possível finalizar a operação solicitada"
 
 msgid "Discard environment changes?"
 msgstr "Descartar mudanças de ambiente?"
@@ -1072,7 +1073,7 @@ msgid "Try a shorter or more general keyword."
 msgstr "Tente escrever uma palavra menor ou uma palavra mais genérica"
 
 msgid "Could not reach Atoll"
-msgstr ""
+msgstr "Não foi possível conectar ao Atoll."
 
 msgid "Check your connection and try again."
 msgstr "Verifique sua conexão e tente novamente."
@@ -1093,7 +1094,7 @@ msgid "Package(s)"
 msgstr "Pacote(s)"
 
 msgid "Page"
-msgstr ""
+msgstr "Página"
 
 msgid "of"
 msgstr "de"
@@ -1152,7 +1153,7 @@ msgstr ""
 "A AUR não tem um índice visualizável. Digite um nome de pacote para começar."
 
 msgid "Could not search the configured AUR service."
-msgstr ""
+msgstr "Não foi possível pesquisar pelo serviço AUR pré configurado"
 
 msgid "Choose a Flatpak file"
 msgstr "Escolha um arquivo Flatpak"
@@ -1161,13 +1162,13 @@ msgid "Flatpak files"
 msgstr "Arquivos Flatpak"
 
 msgid "Unsupported file type. Choose a.flatpak or.flatpakref file."
-msgstr ""
+msgstr "Tipo de arquivo sem suporte. Escolha um arquivo .flatpak ou .flatpakref."
 
 msgid "Installing local flatpak"
 msgstr "Instalando Flatpak local"
 
 msgid "Could not install the selected packages."
-msgstr ""
+msgstr "Não foi possível instalar os pacotes selecionados."
 
 msgid "Installation complete."
 msgstr "Instalação completa"
@@ -1233,13 +1234,13 @@ msgid "No description available."
 msgstr "Sem descrição disponível."
 
 msgid "Could not load this application screenshot."
-msgstr ""
+msgstr "Não foi possível carregar uma captura de tela para essa aplicação."
 
 msgid "Could not download this application screenshot."
-msgstr ""
+msgstr "Não foi possível baixar a captura de tela dessa aplicação."
 
 msgid "Could not display the downloaded application screenshot."
-msgstr ""
+msgstr "Não foi possível exibir a captura de tela baixada para essa aplicação."
 
 msgid "Open link in browser"
 msgstr "Abrir link no navegador"
@@ -1271,13 +1272,13 @@ msgstr "Traduzir"
 msgid ""
 "Could not load Flatpak applications because Shelly ran out of memory. Close "
 "other applications and try again."
-msgstr ""
+msgstr "Não foi possível carregar aplicativos Flatpak porque o Shelly ficou sem memória. Feche outros aplicativos e tente novamente."
 
 msgid "Could not start loading Flatpak applications."
-msgstr ""
+msgstr "Não foi possível iniciar o carregamento de aplicações Flatpak"
 
 msgid "Could not load Flatpak applications from the selected remote."
-msgstr ""
+msgstr "Não foi possível carregar aplicações Flatpak do repositório remoto selecionado."
 
 msgid "No Flatpak applications are available."
 msgstr "Nenhuma aplicação Flatpak está disponível."
@@ -1397,11 +1398,11 @@ msgid "Making Package Dependency"
 msgstr "Criando dependência de pacote"
 
 msgid "Select Optional Dependencies to Install"
-msgstr ""
+msgstr "Selecione dependências opcionais para instalar"
 
 #| msgid "Installing packages"
 msgid "Installing optional dependencies"
-msgstr ""
+msgstr "Instalando dependências opcionais"
 
 msgid "Package is already installed"
 msgstr "Pacote já instalado"
@@ -1447,7 +1448,7 @@ msgstr ""
 "nome para começar."
 
 msgid "Could not search the selected sources."
-msgstr ""
+msgstr "Não foi possível pesquisar nas fontes selecionadas."
 
 msgid "Installation in progress"
 msgstr "Instalação em andamento"
@@ -1467,7 +1468,8 @@ msgstr "Instalar os pacotes selecionados?"
 msgid ""
 "Could not save settings to the configured file. Your latest changes were not "
 "saved."
-msgstr ""
+msgstr "Não foi possível salvar as configurações para o arquivo selecionado. "
+"Suas últimas mudanças não foram salvas."
 
 msgid "Settings saved"
 msgstr "Configurações salvas"
@@ -1479,16 +1481,16 @@ msgid "Installing AppImage support"
 msgstr "Instalando o suporte ao AppImage"
 
 msgid "Could not start installing Flatpak support."
-msgstr ""
+msgstr "Não foi possível iniciar a instalação do suporte ao Flatpak."
 
 msgid "Could not start installing AppImage support."
-msgstr ""
+msgstr "Não foi possível iniciar a instalação do suporte à AppImage."
 
 msgid "Could not install Flatpak support."
-msgstr ""
+msgstr "Não foi possível instalar o suporte para Flatpak."
 
 msgid "Could not install AppImage support."
-msgstr ""
+msgstr "Não foi possível instalar o suporte para AppImages."
 
 msgid "Flatpak support enabled"
 msgstr "Suporte ao Flatpak habilitado"
@@ -1503,7 +1505,7 @@ msgid "No details for this release"
 msgstr "Sem detalhes para essa versão"
 
 msgid "Could not load the release notes."
-msgstr ""
+msgstr "Não foi possível carregar as notas de lançamento"
 
 msgid "Changelog"
 msgstr "Histórico de alterações"
@@ -1521,27 +1523,28 @@ msgid "Select AppImage Install Directory"
 msgstr "Selecionar diretório de instalação AppImage"
 
 msgid "Tray enabled"
-msgstr "Bandeja desabilitada"
+msgstr "Bandeja habilitada"
 
 msgid ""
 "The tray is disabled, but its autostart service could not be removed. It may "
 "start again at the next login."
-msgstr ""
+msgstr "A bandeja está desativada, mas não foi possível remover seu serviço de inicialização automática. "
+"Ela poderá ser iniciada novamente no próximo login."
 
 msgid "Tray disabled"
 msgstr "Bandeja desabilitada"
 
 msgid "Could not enable the tray autostart service."
-msgstr ""
+msgstr "Não foi possível ativar o serviço de inicialização automática da bandeja."
 
 msgid "Systemd startup service added."
 msgstr "Serviço de inicialização Systemd adicionado"
 
 msgid "Could not disable the tray autostart service."
-msgstr ""
+msgstr "Não foi possível desativar o serviço de inicialização automática da bandeja."
 
 msgid "Systemd startup service removed."
-msgstr "Serviço de atualização Systemd removido"
+msgstr "Serviço de inicialização do systemd removido"
 
 msgid "AUR enabled"
 msgstr "AUR habilitada"
@@ -1607,31 +1610,31 @@ msgid "Working"
 msgstr "Trabalhando"
 
 msgid "Upgraded"
-msgstr ""
+msgstr "Atualizado"
 
 msgid "Downgraded"
-msgstr ""
+msgstr "Revertido"
 
 msgid "Reinstalled"
-msgstr ""
+msgstr "Reinstalado"
 
 msgid "Removed"
-msgstr ""
+msgstr "Removido"
 
 msgid "Failed"
 msgstr "Falhou"
 
 msgid "Not processed"
-msgstr ""
+msgstr "Não processado"
 
 msgid "Interrupted"
-msgstr ""
+msgstr "Interrompido"
 
 msgid "Cancelled"
 msgstr "Cancelado"
 
 msgid "Could not start the requested operation."
-msgstr ""
+msgstr "Não foi possível iniciar a operação solicitada."
 
 msgid "Synchronizing databases"
 msgstr "Sincronizando bases de dados"
@@ -1682,7 +1685,7 @@ msgid "Operation failed"
 msgstr "Operação falhou"
 
 msgid "Operation cancelled"
-msgstr ""
+msgstr "Operação cancelada"
 
 msgid "Finished"
 msgstr "Finalizado"
@@ -1691,7 +1694,7 @@ msgid "exit"
 msgstr "Saída"
 
 msgid "Operation cancelled."
-msgstr ""
+msgstr "Operação cancelada."
 
 msgid "All operations finished successfully."
 msgstr "Todas as operações foram concluídas com sucesso."
@@ -1763,16 +1766,16 @@ msgid "Installing Flatpak and AppImage support"
 msgstr "Instalando suporte ao Flatpak e ao AppImage"
 
 msgid "Main menu"
-msgstr ""
+msgstr "Menu principal"
 
 msgid "Settings"
 msgstr "Configurações"
 
 msgid "Expand sidebar"
-msgstr ""
+msgstr "Expandir barra lateral"
 
 msgid "Collapse sidebar"
-msgstr ""
+msgstr "Recolher barra lateral"
 
 msgid "Package"
 msgstr "Pacote"
