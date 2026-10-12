@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) void {
         std.log.warn("Could not initialize translations. Shelly may display untranslated text.", .{});
     }
     if (features.builtWithBackgroundServices) {
-        IconDownloadService(std.heap.c_allocator, runtime.io);
+        IconDownloadService(std.heap.c_allocator, runtime.io, shellyIconsEnabled());
     }
 
     const app = gtk.Application.new("com.shellyorg.shelly", .{
@@ -135,6 +135,11 @@ fn dispatchPendingNavigation(window: *ShellyWindow) void {
     if (!navigated) {
         std.log.warn("Could not open the requested page because it is disabled or unavailable. Enable the corresponding support in settings or choose another page.", .{});
     }
+}
+
+fn shellyIconsEnabled() bool {
+    _ = runtime.setupConfig(std.heap.c_allocator) catch return true;
+    return runtime.shellyIconsEnabled();
 }
 
 fn tryStopTray(io: std.Io, alloc: std.mem.Allocator) void {

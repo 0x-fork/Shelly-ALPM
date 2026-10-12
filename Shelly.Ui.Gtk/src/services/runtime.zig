@@ -69,7 +69,6 @@ pub fn queueLocalAppImagePath(path: []const u8) void {
     pending_navigation = .{ .local_appimage_file = pending };
 }
 
-
 pub fn takePendingNavigation() ?PendingNavigation {
     const pending = pending_navigation;
     pending_navigation = null;
@@ -77,6 +76,13 @@ pub fn takePendingNavigation() ?PendingNavigation {
 }
 
 pub var config: ?*ConfigResolver = null;
+
+/// Whether downloaded package icons should be used. True when settings are unavailable.
+pub fn shellyIconsEnabled() bool {
+    const svc = config orelse return true;
+    const cfg = svc.get() catch return true;
+    return cfg.ShellyIconsEnabled;
+}
 
 pub fn setup(init: std.process.Init) void {
     io = init.io;

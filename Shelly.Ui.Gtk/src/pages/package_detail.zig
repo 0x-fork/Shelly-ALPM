@@ -6,6 +6,7 @@ const glib = bindings.glib;
 const gobject = bindings.gobject;
 const c_string = @import("../helpers/c_string.zig");
 const support = @import("support.zig");
+const runtime = @import("../services/runtime.zig");
 const ShellyCli = @import("../services/shelly_cli.zig").ShellyCli;
 const Package = @import("../models/packages.zig").Package;
 const SizeConverter = @import("../helpers/size_converts.zig").SizeConverter;
@@ -121,10 +122,14 @@ pub const PackageDetail = extern struct {
         @memset(&p.pending_name, 0);
         @memcpy(p.pending_name[0..len], name[0..len]);
         p.pending_len = len;
-        if (icon_path) |path| {
-            gtk.Image.setFromFile(p.icon, path);
-        } else {
-            gtk.Image.setFromIconName(p.icon, "package-x-generic");
+        const icons_on = runtime.shellyIconsEnabled();
+        gtk.Widget.setVisible(p.icon.as(gtk.Widget), @intFromBool(icons_on));
+        if (icons_on) {
+            if (icon_path) |path| {
+                gtk.Image.setFromFile(p.icon, path);
+            } else {
+                gtk.Image.setFromIconName(p.icon, "package-x-generic");
+            }
         }
         var buf: [256]u8 = undefined;
         gtk.Label.setLabel(p.name_label, c_string.cstr(&buf, name));
