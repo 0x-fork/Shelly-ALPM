@@ -223,7 +223,21 @@ pub fn runStep(
         self.package_builds[0].options orelse &.{},
     );
     defer metadata.freeOwnedStrings(self.allocator, effective_options);
-    const step_argv: []const []const u8 = &.{ "/bin/bash", "-e", "-c", command_body, "shelly-step", current_pkgver, pkgver_result_path, metadata_result_path, runtime_startdir, srcdir, runtime_pkgdir, ownership_result_path, wrappers_path orelse "", self.package_builds[0].pkg_rel orelse "" };
+    // Generated split bases can exceed Linux's per-argument limit. Keep the
+    // script in the sandbox's private work directory instead of a bash -c
+    // argument; sourcing without extra arguments preserves $0 and $1..$9.
+    var script_random: [8]u8 = undefined;
+    self.io.random(&script_random);
+    const script_suffix = std.fmt.bytesToHex(script_random, .lower);
+    const script_path = try std.fmt.allocPrint(self.allocator, "{s}/.shelly-step-{s}.bash", .{ self.options.work_directory, script_suffix });
+    defer self.allocator.free(script_path);
+    var script_file = try std.Io.Dir.cwd().createFile(self.io, script_path, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    defer std.Io.Dir.cwd().deleteFile(self.io, script_path) catch {};
+    {
+        defer script_file.close(self.io);
+        try script_file.writeStreamingAll(self.io, command_body);
+    }
+    const step_argv: []const []const u8 = &.{ "/bin/bash", "-e", "-c", "builtin source -- \"${10}\"", "shelly-step", current_pkgver, pkgver_result_path, metadata_result_path, runtime_startdir, srcdir, runtime_pkgdir, ownership_result_path, wrappers_path orelse "", self.package_builds[0].pkg_rel orelse "", script_path };
     const sandbox_enabled = self.shellybuild_config.sandbox.enabled;
     const wrapped = if (sandbox_enabled) try wrapStepCommand(self, step_argv) else null;
     defer if (wrapped) |command| command.deinit(self.allocator);
@@ -415,6 +429,7 @@ pub const DynamicMetadataOverrides = struct {
     arrays: DynamicArrayOverrides,
     unset_arrays: DynamicArrayUnsets,
     shell_options: ShellOptionDelta,
+    functions: std.StringHashMap([]const u8),
 
     pub fn deinit(self: *DynamicMetadataOverrides, allocator: std.mem.Allocator) void {
         deinitDynamicScalarOverrides(allocator, &self.scalars);
@@ -422,6 +437,7 @@ pub const DynamicMetadataOverrides = struct {
         deinitDynamicArrayOverrides(allocator, &self.arrays);
         deinitDynamicArrayUnsets(allocator, &self.unset_arrays);
         self.shell_options.deinit(allocator);
+        deinitDynamicScalarOverrides(allocator, &self.functions);
         self.* = undefined;
     }
 };
@@ -768,9 +784,72 @@ fn parseDynamicArrayOutput(
     return .{ .values = values, .unsets = unsets };
 }
 
+// Function records contain a name and the complete Bash declaration. This is
+// an authoritative snapshot, so absent names (including unset -f) stay absent.
+const dynamic_function_capture_prelude =
+    \\declare -A __shelly_before_functions=()
+    \\__shelly_snapshot_functions() {
+    \\  local __shelly_name
+    \\  while IFS= read -r __shelly_name; do
+    \\    __shelly_before_functions["$__shelly_name"]=$(builtin declare -f -- "$__shelly_name")
+    \\  done < <(builtin compgen -A function)
+    \\}
+    \\__shelly_capture_functions() {
+    \\  local __shelly_name __shelly_definition __shelly_count=0 __shelly_bytes=0
+    \\  : > "$1"
+    \\  while IFS= read -r __shelly_name; do
+    \\    case "$__shelly_name" in __shelly_*) continue ;; esac
+    \\    __shelly_definition=$(builtin declare -f -- "$__shelly_name") || return 1
+    \\    if [[ ${__shelly_before_functions[$__shelly_name]+present} == present && ${__shelly_before_functions[$__shelly_name]} == "$__shelly_definition" ]]; then
+    \\      continue
+    \\    fi
+    \\    __shelly_count=$((__shelly_count + 1))
+    \\    __shelly_bytes=$((__shelly_bytes + ${#__shelly_name} + ${#__shelly_definition} + 2))
+    \\    (( __shelly_count <= 4096 && __shelly_bytes <= 4194304 )) || return 1
+    \\    builtin printf '%s\0%s\0' "$__shelly_name" "$__shelly_definition" >> "$1"
+    \\  done < <(builtin compgen -A function)
+    \\}
+    \\readonly -f __shelly_snapshot_functions __shelly_capture_functions
+;
+
+fn parseDynamicFunctionOutput(allocator: std.mem.Allocator, output: []const u8) !std.StringHashMap([]const u8) {
+    const function_body = @import("../../pkgbuild/parser/function_body.zig");
+    var functions = std.StringHashMap([]const u8).init(allocator);
+    errdefer deinitDynamicScalarOverrides(allocator, &functions);
+    if (output.len > 4 * 1024 * 1024) return error.InvalidDynamicFunctionOutput;
+    var records = std.mem.splitScalar(u8, output, 0);
+    while (true) {
+        const name = records.next() orelse return error.InvalidDynamicFunctionOutput;
+        if (name.len == 0) {
+            if (records.next() != null) return error.InvalidDynamicFunctionOutput;
+            break;
+        }
+        if (functions.count() >= 4096 or functions.contains(name) or
+            std.mem.startsWith(u8, name, "__shelly_")) return error.InvalidDynamicFunctionOutput;
+        for (name) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "_-+.:", byte) == null)
+                return error.InvalidDynamicFunctionOutput;
+        }
+        const definition = records.next() orelse return error.InvalidDynamicFunctionOutput;
+        // Accept one complete canonical declaration, never trailing commands.
+        if (!std.mem.startsWith(u8, definition, name)) return error.InvalidDynamicFunctionOutput;
+        const suffix = definition[name.len..];
+        if (!std.mem.startsWith(u8, suffix, " () \n")) return error.InvalidDynamicFunctionOutput;
+        const end = (try function_body.function_end(definition, name)) orelse return error.InvalidDynamicFunctionOutput;
+        if (end > definition.len or std.mem.trim(u8, definition[end..], " \t\r\n").len != 0)
+            return error.InvalidDynamicFunctionOutput;
+        const key = try allocator.dupe(u8, name);
+        errdefer allocator.free(key);
+        const value = try allocator.dupe(u8, definition);
+        errdefer allocator.free(value);
+        try functions.put(key, value);
+    }
+    return functions;
+}
+
 /// Sources the reviewed PKGBUILD in the same sandbox used for lifecycle steps
-/// and captures one coherent snapshot of PKGBUILD scalar and indexed-array
-/// state. Each evaluation starts from the base PKGBUILD, never from a previous
+/// and captures one coherent snapshot of PKGBUILD scalar, indexed-array, and
+/// function state. Each evaluation starts from the base PKGBUILD, never from a previous
 /// evaluation's declarations. Sourcing preserves arbitrary top-level
 /// parameter defaults, `if`, `case`, helper calls, and short-circuit control
 /// flow; lifecycle functions are defined by Bash but are not invoked here.
@@ -824,6 +903,8 @@ pub fn evaluateDynamicMetadata(
     try writer.writeAll(dynamic_scalar_capture_prelude);
     try writer.writeAll("\n");
     try writer.writeAll(dynamic_array_capture_prelude);
+    try writer.writeAll("\n");
+    try writer.writeAll(dynamic_function_capture_prelude);
     try writer.writeAll(
         "\n__shelly_clear_user_arrays\n" ++
             "__shelly_snapshot_scalars\n" ++
@@ -840,9 +921,11 @@ pub fn evaluateDynamicMetadata(
         try writeTrackedMetadataName(writer, assignment.name, "scalar");
     for (array_names.items) |name| try writeTrackedMetadataName(writer, name, "array");
     try writer.writeAll(
-        "__shelly_before_bashopts=$BASHOPTS\n" ++
+        "__shelly_snapshot_functions\n" ++
+            "__shelly_before_bashopts=$BASHOPTS\n" ++
             "__shelly_before_shellopts=$SHELLOPTS\n" ++
             "source \"$4\"\n" ++
+            "__shelly_capture_functions \"$9\"\n" ++
             "__shelly_capture_scalar_changes \"$1\"\n" ++
             "__shelly_capture_array_changes \"$2\"\n" ++
             "printf '%s\\0%s\\0%s\\0%s\\0' \"$__shelly_before_bashopts\" \"$BASHOPTS\" \"$__shelly_before_shellopts\" \"$SHELLOPTS\" > \"$3\"\n",
@@ -881,6 +964,14 @@ pub fn evaluateDynamicMetadata(
     };
     defer std.Io.Dir.cwd().deleteFile(self.io, shell_option_result_path) catch {};
 
+    const function_result_path = try std.fs.path.join(self.allocator, &.{ self.options.work_directory, ".shelly-dynamic-functions" });
+    defer self.allocator.free(function_result_path);
+    std.Io.Dir.cwd().deleteFile(self.io, function_result_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    defer std.Io.Dir.cwd().deleteFile(self.io, function_result_path) catch {};
+
     try logPhase(self, "dynamic-metadata");
     try operation.checkCancelled();
     self.failure_location = .{
@@ -913,6 +1004,7 @@ pub fn evaluateDynamicMetadata(
         srcdir,
         pkgdir,
         self.shellybuild_config.build.carch,
+        function_result_path,
     };
     const sandbox_enabled = self.shellybuild_config.sandbox.enabled;
     const wrapped = if (sandbox_enabled) try wrapStepCommand(self, argv) else null;
@@ -972,7 +1064,11 @@ pub fn evaluateDynamicMetadata(
     defer self.allocator.free(shell_option_output);
     var shell_options = try parseShellOptionDelta(self.allocator, shell_option_output);
     errdefer shell_options.deinit(self.allocator);
+    const function_output = try std.Io.Dir.cwd().readFileAlloc(self.io, function_result_path, self.allocator, .limited(4 * 1024 * 1024));
+    defer self.allocator.free(function_output);
+    const functions = try parseDynamicFunctionOutput(self.allocator, function_output);
     return .{
+        .functions = functions,
         .scalars = scalar_result,
         .unset_scalars = unset_scalar_result,
         .arrays = array_result,
@@ -1545,4 +1641,39 @@ pub fn isPackageStep(name: []const u8) bool {
 pub fn findPackageStep(steps: []const ExecutionStep) ?*const ExecutionStep {
     for (steps) |*step| if (isPackageStep(step.name)) return step;
     return null;
+}
+
+test "dynamic function output validates complete bounded declarations" {
+    const allocator = std.testing.allocator;
+    const definition = "package_demo () \n{ \n    depends=(\"bash\");\n    printf '%s' \"$pkgdir\"\n}";
+    var functions = try parseDynamicFunctionOutput(allocator, "package_demo\x00" ++ definition ++ "\x00");
+    defer deinitDynamicScalarOverrides(allocator, &functions);
+    try std.testing.expectEqualStrings(definition, functions.get("package_demo").?);
+    for ([_][]const u8{
+        "demo\x00",
+        "demo\x00demo () \n{ :; }",
+        "demo\x00demo () \n{ :; }\x00\x00",
+        "demo\x00demo () \n{ :; }\x00demo\x00demo () \n{ :; }\x00",
+        "demo\x00demo () \n{ :; }; touch unwanted\x00",
+        "demo\x00demo () \n{ :;\x00",
+        "other\x00demo () \n{ :; }\x00",
+        "__shelly_step\x00__shelly_step () \n{ :; }\x00",
+        "bad name\x00bad name () \n{ :; }\x00",
+    }) |invalid| try std.testing.expectError(error.InvalidDynamicFunctionOutput, parseDynamicFunctionOutput(allocator, invalid));
+    var empty = try parseDynamicFunctionOutput(allocator, "");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
+}
+
+test "dynamic function output rejects oversized snapshots" {
+    const allocator = std.testing.allocator;
+    const oversized = try allocator.alloc(u8, 4 * 1024 * 1024 + 1);
+    defer allocator.free(oversized);
+    try std.testing.expectError(error.InvalidDynamicFunctionOutput, parseDynamicFunctionOutput(allocator, oversized));
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    for (0..4097) |index| {
+        try output.writer.print("f{d}\x00f{d} () \n{{ :; }}\x00", .{ index, index });
+    }
+    try std.testing.expectError(error.InvalidDynamicFunctionOutput, parseDynamicFunctionOutput(allocator, output.written()));
 }

@@ -67,6 +67,10 @@ pub const PkgbuildParser = struct {
     /// Each map value owns an ordered list of already-expanded Bash array
     /// elements. Null during the initial static analysis parse.
     dynamic_array_overrides: ?*const std.StringHashMap([]const []const u8) = null,
+    /// Authoritative function definitions from the reviewed Bash evaluation.
+    /// Null means static analysis; an empty snapshot means no user functions.
+    /// Borrowed for parsing only; execution plans own their copied definitions.
+    dynamic_functions: ?*const std.StringHashMap([]const u8) = null,
     /// Indexed arrays removed while sourcing the reviewed PKGBUILD.
     dynamic_array_unsets: ?*const std.StringHashMap(void) = null,
 

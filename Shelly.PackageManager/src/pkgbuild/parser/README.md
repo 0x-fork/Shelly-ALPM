@@ -28,10 +28,14 @@ PkgbuildParser.parser_content (parser.zig)
 
 `PkgbuildParser` (in `parser.zig`) is a small context value —
 `{ allocator, io, selected_package_name, package_carch, dynamic_overrides,
-dynamic_unsets, dynamic_array_overrides }` — passed into every module function;
+dynamic_unsets, dynamic_array_overrides, dynamic_functions }` — passed into every module function;
 split-package builds set `selected_package_name` to evaluate one
 `package_<name>()` at a time. The dynamic maps contain state captured while
 sourcing the reviewed PKGBUILD in the build sandbox.
+`dynamic_functions` is an optional authoritative map of Bash function definitions:
+null keeps static analysis, while an empty map means no functions survived
+evaluation. Metadata lookup uses these definitions without executing them;
+execution plans copy them and invoke the selected function in Bash.
 
 ## Files
 

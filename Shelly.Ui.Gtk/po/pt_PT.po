@@ -3,8 +3,9 @@ msgstr ""
 "Project-Id-Version: shelly-ui 2.2.4.1\n"
 "Report-Msgid-Bugs-To: csnyder@seafoam-labs.org\n"
 "POT-Creation-Date: 2026-10-11 18:31-0300\n"
-"PO-Revision-Date: 2026-09-22 15:10+0100\n"
-"Last-Translator: Ricardo Simões <xmcorporation@gmail.com>, 2026\n"
+"PO-Revision-Date: 2026-10-12 22:00+0100\n"
+"Last-Translator: Ricardo Simões - xmcorporation.com "
+"<xmcorporation@gmail.com>\n"
 "Language-Team: csnyder@seafoam-labs.org\n"
 "Language: pt_PT\n"
 "MIME-Version: 1.0\n"
@@ -61,12 +62,11 @@ msgstr "Os dados da aplicação serão removidos permanentemente."
 msgid "Confirm"
 msgstr "Confirmar"
 
-#| msgid "No description available."
 msgid "Permissions unavailable"
-msgstr ""
+msgstr "Permissões indisponíveis"
 
 msgid "Shelly could not read the permissions for this app."
-msgstr ""
+msgstr "O Shelly não conseguiu ler as permissões para esta app."
 
 msgid "No special permissions requested"
 msgstr "Não são pedidas permissões especiais"
@@ -114,12 +114,11 @@ msgstr ""
 msgid "Review PKGBUILD"
 msgstr "Rever PKGBUILD"
 
-#| msgid "Review PKGBUILD"
 msgid "PKGBUILD"
-msgstr ""
+msgstr "PKGBUILD"
 
 msgid "Retry"
-msgstr ""
+msgstr "Tentar novamente"
 
 msgid "Skip"
 msgstr "Ignorar"
@@ -213,9 +212,8 @@ msgstr "Remover"
 msgid "Search the AUR by name or keyword"
 msgstr "Procurar no AUR por nome ou palavra-chave"
 
-#| msgid "Search..."
 msgid "Search By"
-msgstr ""
+msgstr "Pesquisar Por"
 
 msgid "Installed Only"
 msgstr "Apenas Instalados"
@@ -224,14 +222,13 @@ msgid "Show only installed packages"
 msgstr "Mostrar apenas pacotes instalados"
 
 msgid "Previous page"
-msgstr ""
+msgstr "Página anterior"
 
 msgid "Page 1 of 1"
-msgstr ""
+msgstr "Página 1 de 1"
 
-#| msgid "Default page"
 msgid "Next page"
-msgstr ""
+msgstr "Página seguinte"
 
 msgid "Additional Options"
 msgstr "Opções Adicionais"
@@ -239,9 +236,8 @@ msgstr "Opções Adicionais"
 msgid "Install Selected"
 msgstr "Instalar Selecionados"
 
-#| msgid "Selected"
 msgid "Select"
-msgstr ""
+msgstr "Selecionar"
 
 msgid "Name"
 msgstr "Nome"
@@ -253,10 +249,10 @@ msgid "Popularity"
 msgstr "Popularidade"
 
 msgid "Loading the AUR index"
-msgstr ""
+msgstr "A carregar o índice AUR"
 
 msgid "Powered by Atoll."
-msgstr ""
+msgstr "Com tecnologia Atoll."
 
 msgid "Run checks"
 msgstr "Executar verificações"
@@ -407,9 +403,8 @@ msgstr "Acerca de"
 msgid "Shelly"
 msgstr "Shelly"
 
-#| msgid "Optional Depends"
 msgid "Install Optional Deps"
-msgstr ""
+msgstr "Instalar Dependências Opcionais"
 
 msgid "Reinstall"
 msgstr "Reinstalar"
@@ -659,7 +654,7 @@ msgid "Enable Shelly Search"
 msgstr "Ativar Procura do Shelly"
 
 msgid "Enable Atoll Powered AUR"
-msgstr ""
+msgstr "Ativar Atoll no AUR"
 
 msgid "AppImage Install Path"
 msgstr "Caminho da Instalação AppImage"
@@ -845,27 +840,26 @@ msgstr "Seguinte"
 msgid "Start Shelly"
 msgstr "Iniciar Shelly"
 
-#| msgid "System bus"
 msgid "System files"
-msgstr ""
+msgstr "Ficheiros do sistema"
 
 msgid "Other folders"
-msgstr ""
+msgstr "Outras pastas"
 
 msgid "Running services"
-msgstr ""
+msgstr "Serviços em execução"
 
 msgid "Other apps' data"
-msgstr ""
+msgstr "Dados de outras apps"
 
 msgid "Home folder"
-msgstr ""
+msgstr "Pasta home"
 
 msgid "User folders"
-msgstr ""
+msgstr "Pasta do utilizador"
 
 msgid "Persistent files"
-msgstr ""
+msgstr "Ficheiros persistentes"
 
 msgid "Devices"
 msgstr "Dispositivos"
@@ -876,39 +870,38 @@ msgstr "Bus da Sessão"
 msgid "System bus"
 msgstr "Bus do Sistema"
 
-#| msgid "Network"
 msgid "Network access"
-msgstr ""
+msgstr "Acesso de rede"
 
 msgid "Display server"
-msgstr ""
+msgstr "Servidor de visualização"
 
 msgid "Sandbox features"
-msgstr ""
+msgstr "Funcionalidade Sandbox"
 
 msgid "Environment"
 msgstr "Ambiente"
 
 msgid "Sound"
-msgstr ""
+msgstr "Som"
 
 msgid "Printing"
-msgstr ""
+msgstr "Impressão"
 
 msgid "Inter-process communication"
-msgstr ""
+msgstr "Comunicação inter-processso"
 
 msgid "Other"
 msgstr "Outro"
 
 msgid "No network access"
-msgstr ""
+msgstr "Sem acesso de rede"
 
 msgid "No device access"
-msgstr ""
+msgstr "Sem acesso do dispositivo"
 
 msgid "No access to system files"
-msgstr ""
+msgstr "Sem acesso aos ficheiros do sistema"
 
 msgid "Review PKGBUILD changes for"
 msgstr "Rever alterações do PKGBUILD para"
@@ -953,11 +946,10 @@ msgid "net"
 msgstr "rede"
 
 msgid "Scanning PKGBUILD…"
-msgstr ""
+msgstr "A analisar PKGBUILD…"
 
-#| msgid "No description available."
 msgid "Security scan unavailable."
-msgstr ""
+msgstr "Análise de segurança indisponível."
 
 msgid "Could not load the PKGBUILD preview."
 msgstr "Não foi possível carregar a pré-visualização do PKGBUILD."
@@ -965,13 +957,14 @@ msgstr "Não foi possível carregar a pré-visualização do PKGBUILD."
 msgid ""
 "PKGBUILD changed. Close and reopen the preview to scan the current version."
 msgstr ""
+"O PKGBUILD foi alterado. Feche e reabra a pré-visualização para analisar a "
+"versão atual."
 
-#| msgid "Flatpak files"
 msgid "No related files."
-msgstr ""
+msgstr "Sem ficheiros relacionados."
 
 msgid "Previous"
-msgstr ""
+msgstr "Anterior"
 
 msgid "Dismiss"
 msgstr "Dispensar"
@@ -1078,7 +1071,7 @@ msgid "Try a shorter or more general keyword."
 msgstr "Tente uma palavra-chave mais curta ou mais genérica."
 
 msgid "Could not reach Atoll"
-msgstr ""
+msgstr "Não foi possível alcançar o Atoll"
 
 msgid "Check your connection and try again."
 msgstr "Verifique a sua ligação e tente novamente."
@@ -1099,7 +1092,7 @@ msgid "Package(s)"
 msgstr "Pacote(s)"
 
 msgid "Page"
-msgstr ""
+msgstr "Página"
 
 msgid "of"
 msgstr "de"
@@ -1408,11 +1401,10 @@ msgid "Making Package Dependency"
 msgstr "A marcar Pacote como Dependência"
 
 msgid "Select Optional Dependencies to Install"
-msgstr ""
+msgstr "Selecionar Dependências Opcionais para Instalar"
 
-#| msgid "Installing packages"
 msgid "Installing optional dependencies"
-msgstr ""
+msgstr "A instalar dependências opcionais"
 
 msgid "Package is already installed"
 msgstr "O pacote já está instalado"
@@ -1778,16 +1770,16 @@ msgid "Installing Flatpak and AppImage support"
 msgstr "A instalar suporte para Flatpak e AppImage"
 
 msgid "Main menu"
-msgstr ""
+msgstr "Menu principal"
 
 msgid "Settings"
 msgstr "Definições"
 
 msgid "Expand sidebar"
-msgstr ""
+msgstr "Expandir barra lateral"
 
 msgid "Collapse sidebar"
-msgstr ""
+msgstr "Colapsar barra lateral"
 
 msgid "Package"
 msgstr "Pacote"
