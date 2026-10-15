@@ -441,7 +441,9 @@ fn packageArchitecture(self: *const PackageBuilder, package_build: *const Packag
             if (std.mem.eql(u8, architecture, "any")) return "any";
         }
     }
-    return self.shellybuild_config.build.carch;
+    // PACKAGECARCH equivalent: only the artifact is relabelled; the PKGBUILD
+    // was evaluated and checked against build.carch.
+    return self.shellybuild_config.packageCarch();
 }
 
 pub fn packageSupportsArchitecture(
