@@ -2014,6 +2014,7 @@ fn renderIsolatedConfiguration(
     try writer.writeAll("[package]\n");
     try writeTomlString(writer, "packager", configuration.package.packager);
     try writeTomlString(writer, "extension", configuration.package.extension);
+    if (configuration.package.carch) |carch| try writeTomlString(writer, "carch", carch);
     if (configuration.package.compression_level) |preset|
         try writer.print("compression_level = {d}\n", .{@intFromEnum(preset)});
     try writeTomlArray(writer, "options", configuration.package.options);
@@ -4141,6 +4142,7 @@ test "isolated configuration preserves build policy and forces guest-local desti
     defer configuration.deinit();
     configuration.build.extra_path = &.{"/opt/guest-toolchain/bin"};
     configuration.package.compression_level = .compact;
+    configuration.package.carch = "x86_64_v3";
     configuration.build.env = &.{
         .{ .name = "JAVA_HOME", .value = "/opt/guest-java" },
         .{ .name = "BUILD_ENV_LITERAL", .value = "$HOME/~/\"quoted\"\\path\n\t∂" },
@@ -4157,6 +4159,8 @@ test "isolated configuration preserves build policy and forces guest-local desti
     defer parsed.deinit();
     try std.testing.expectEqualStrings(configuration.build.carch, parsed.build.carch);
     try std.testing.expectEqual(configuration.package.compression_level, parsed.package.compression_level);
+    try std.testing.expectEqualStrings("x86_64_v3", parsed.package.carch.?);
+    try std.testing.expectEqualStrings("x86_64_v3", parsed.packageCarch());
     try std.testing.expectEqualStrings("/opt/guest-toolchain/bin", parsed.build.extra_path[0]);
     try std.testing.expectEqualStrings(configuration.build.cflags[0], parsed.build.cflags[0]);
     try std.testing.expectEqual(configuration.build.env.len, parsed.build.env.len);

@@ -554,6 +554,62 @@ test "PackageBuilder signs published packages with the configured signing key" {
     defer kill.deinit(allocator);
 }
 
+test "PackageBuilder signs the package carch artifact under its relabelled name" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=signing-carch-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('x86_64')
+        \\package() {
+        \\  mkdir -p "$pkgdir/usr/share/signing-carch-demo"
+        \\  printf 'signed v3 payload\n' > "$pkgdir/usr/share/signing-carch-demo/data"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    const gnupg_home = try prepareSigningPgpHome(&fixture);
+    defer allocator.free(gnupg_home);
+    fixture.builder.options.sign = true;
+    fixture.builder.options.sign_key = signing_pgp_fingerprint;
+    fixture.builder.options.sign_gnupg_home = gnupg_home;
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
+    try expectPackageArchitecture(allocator, artifacts[0], "/signing-carch-demo-1-1-x86_64_v3.pkg.tar.zst", "x86_64_v3");
+
+    // The detached signature sits next to, and verifies, the v3 archive; no
+    // archive or signature under the build.carch name is published.
+    const signature_path = try std.fmt.allocPrint(allocator, "{s}.sig", .{artifacts[0].path});
+    defer allocator.free(signature_path);
+    try std.Io.Dir.cwd().access(io, signature_path, .{});
+    for ([_][]const u8{ "signing-carch-demo-1-1-x86_64.pkg.tar.zst", "signing-carch-demo-1-1-x86_64.pkg.tar.zst.sig" }) |name| {
+        const stale = try std.fs.path.join(allocator, &.{ fixture.build_dir, name });
+        defer allocator.free(stale);
+        try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, stale, .{}));
+    }
+
+    const verifier = source_pgp_verifier.Verifier{
+        .allocator = allocator,
+        .io = io,
+        .environ = testing.environ,
+        .gnupg_home = gnupg_home,
+    };
+    var verification = try verifier.verifyDetached(
+        signature_path,
+        artifacts[0].path,
+        &.{signing_pgp_fingerprint},
+    );
+    defer verification.deinit(allocator);
+    try testing.expectEqualStrings(signing_pgp_fingerprint, verification.primary_fingerprint);
+    try testing.expectEqual(source_pgp_verifier.Warning.none, verification.warning);
+
+    var kill = try process_runner.run(allocator, io, &.{ "/usr/bin/gpgconf", "--homedir", gnupg_home, "--kill", "gpg-agent" }, null, null);
+    defer kill.deinit(allocator);
+}
+
 test "PackageBuilder compression presets apply to every split package" {
     const allocator = testing.allocator;
     const content =
@@ -2675,6 +2731,143 @@ test "PackageBuilder emits makepkg-compatible BUILDINFO and MTREE metadata" {
     const payload_hex = std.fmt.bytesToHex(payload_digest, .lower);
     try testing.expect(std.mem.indexOf(u8, gzip.stdout, &payload_hex) != null);
     try testing.expect(std.mem.indexOf(u8, gzip.stdout, "sha256digest=") != null);
+}
+
+test "PackageBuilder package carch relabels artifacts while PKGBUILD evaluation keeps build carch" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=package-carch-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('x86_64')
+        \\depends_x86_64=('carch-dependency')
+        \\package() {
+        \\  mkdir -p "$pkgdir/usr/share/package-carch-demo"
+        \\  printf '%s\n' "$CARCH" > "$pkgdir/usr/share/package-carch-demo/carch"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
+    try testing.expect(std.mem.endsWith(u8, artifacts[0].path, "/package-carch-demo-1-1-x86_64_v3.pkg.tar.zst"));
+
+    const pkg_info = try readPkgInfo(allocator, artifacts[0].path);
+    defer allocator.free(pkg_info);
+    try testing.expect(std.mem.indexOf(u8, pkg_info, "arch = x86_64_v3\n") != null);
+    try testing.expect(std.mem.indexOf(u8, pkg_info, "depend = carch-dependency\n") != null);
+    const build_info = try readPackageEntry(allocator, artifacts[0].path, ".BUILDINFO");
+    defer allocator.free(build_info);
+    try testing.expect(std.mem.indexOf(u8, build_info, "pkgarch = x86_64_v3\n") != null);
+    const evaluated_carch = try readPackageEntry(allocator, artifacts[0].path, "usr/share/package-carch-demo/carch");
+    defer allocator.free(evaluated_carch);
+    try testing.expectEqualStrings("x86_64\n", evaluated_carch);
+}
+
+test "PackageBuilder package carch leaves arch any packages untouched" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=package-carch-any-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\package() {
+        \\  mkdir -p "$pkgdir/usr/share/package-carch-any-demo"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expect(std.mem.endsWith(u8, artifacts[0].path, "/package-carch-any-demo-1-1-any.pkg.tar.zst"));
+    const pkg_info = try readPkgInfo(allocator, artifacts[0].path);
+    defer allocator.free(pkg_info);
+    try testing.expect(std.mem.indexOf(u8, pkg_info, "arch = any\n") != null);
+}
+
+fn expectPackageArchitecture(allocator: std.mem.Allocator, artifact: builder_mod.BuildArtifact, file_name: []const u8, architecture: []const u8) !void {
+    try testing.expect(std.mem.endsWith(u8, artifact.path, file_name));
+    const pkg_info = try readPkgInfo(allocator, artifact.path);
+    defer allocator.free(pkg_info);
+    const arch_line = try std.fmt.allocPrint(allocator, "arch = {s}\n", .{architecture});
+    defer allocator.free(arch_line);
+    try testing.expect(std.mem.indexOf(u8, pkg_info, arch_line) != null);
+    const build_info = try readPackageEntry(allocator, artifact.path, ".BUILDINFO");
+    defer allocator.free(build_info);
+    const pkgarch_line = try std.fmt.allocPrint(allocator, "pkgarch = {s}\n", .{architecture});
+    defer allocator.free(pkgarch_line);
+    try testing.expect(std.mem.indexOf(u8, build_info, pkgarch_line) != null);
+}
+
+test "PackageBuilder package carch labels each split member independently" {
+    const allocator = testing.allocator;
+    const content =
+        \\pkgbase=package-carch-split
+        \\pkgname=('package-carch-split-bin' 'package-carch-split-data')
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('x86_64')
+        \\package_package-carch-split-bin() {
+        \\  mkdir -p "$pkgdir/usr/bin"
+        \\  printf bin > "$pkgdir/usr/bin/package-carch-split"
+        \\}
+        \\package_package-carch-split-data() {
+        \\  arch=('any')
+        \\  mkdir -p "$pkgdir/usr/share/package-carch-split"
+        \\  printf data > "$pkgdir/usr/share/package-carch-split/data"
+        \\}
+    ;
+    const requested = [_][]const u8{ "package-carch-split-bin", "package-carch-split-data" };
+    var fixture = try Fixture.createMany(allocator, content, &requested, null);
+    defer fixture.destroy();
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 2), artifacts.len);
+    for (artifacts) |artifact| {
+        if (std.mem.eql(u8, artifact.package_name, "package-carch-split-bin")) {
+            try expectPackageArchitecture(allocator, artifact, "/package-carch-split-bin-1-1-x86_64_v3.pkg.tar.zst", "x86_64_v3");
+        } else {
+            try testing.expectEqualStrings("package-carch-split-data", artifact.package_name);
+            try expectPackageArchitecture(allocator, artifact, "/package-carch-split-data-1-1-any.pkg.tar.zst", "any");
+        }
+    }
+}
+
+test "PackageBuilder arch support check keeps build carch when package carch is set" {
+    // Contract: package.carch only relabels artifacts. A member that declares
+    // only the package architecture is unsupported for build.carch and skipped;
+    // if the support check ever used packageCarch(), it would be built too.
+    const allocator = testing.allocator;
+    const content =
+        \\pkgbase=package-carch-contract
+        \\pkgname=('package-carch-contract-native' 'package-carch-contract-v3-only')
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('x86_64' 'x86_64_v3')
+        \\package_package-carch-contract-native() {
+        \\  mkdir -p "$pkgdir/usr/share/native"
+        \\}
+        \\package_package-carch-contract-v3-only() {
+        \\  arch=('x86_64_v3')
+        \\  mkdir -p "$pkgdir/usr/share/v3-only"
+        \\}
+    ;
+    const requested = [_][]const u8{ "package-carch-contract-native", "package-carch-contract-v3-only" };
+    var fixture = try Fixture.createMany(allocator, content, &requested, null);
+    defer fixture.destroy();
+    try testing.expectEqualStrings("x86_64", fixture.builder.shellybuild_config.build.carch);
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
+    try testing.expectEqualStrings("package-carch-contract-native", artifacts[0].package_name);
+    try expectPackageArchitecture(allocator, artifacts[0], "/package-carch-contract-native-1-1-x86_64_v3.pkg.tar.zst", "x86_64_v3");
 }
 
 test "PackageBuilder SRCDEST keeps auxiliary downloads visible during make install issue 2017" {
