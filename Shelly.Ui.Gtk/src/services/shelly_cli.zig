@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const Io = std.Io;
 const Package = @import("../models/packages.zig").Package;
 const Remote = @import("../models/flatpak.zig").Remote;
@@ -102,7 +103,7 @@ pub const ShellyCli = struct {
             .argv = argv,
             .environ_map = runtime.environ_map,
         }) catch |err| {
-            const message = try @import("diagnostics").format(self.allocator, err, .{ .operation = "the Shelly command", .path = argv[0] });
+            const message = try diagnostics.format(self.allocator, err, .{ .operation = "the Shelly command", .path = argv[0] });
             defer self.allocator.free(message);
             log.err("{s}", .{message});
             if (self.failure_detail) |detail| detail.* = try self.allocator.dupe(u8, message);
@@ -115,11 +116,11 @@ pub const ShellyCli = struct {
         if (result.term != .exited or result.term.exited != 0) {
             const structured = try JsonPackFrame.failureMessage(self.allocator, result.stdout);
             defer if (structured) |message| self.allocator.free(message);
-            const message = try @import("diagnostics").sanitizeAlloc(self.allocator, structured orelse
+            const message = try diagnostics.sanitizeAlloc(self.allocator, structured orelse
                 if (result.stderr.len > 0) result.stderr else "Shelly returned no error details. Review the command output before retrying.");
             defer self.allocator.free(message);
             log.err("Could not run {f}. {s}\nProcess result: {any}", .{
-                @import("diagnostics").safe(argv[0]), message, result.term,
+                diagnostics.safe(argv[0]), message, result.term,
             });
             if (self.failure_detail) |detail| detail.* = try self.allocator.dupe(u8, message);
             return error.CommandFailed;
@@ -196,7 +197,7 @@ pub const ShellyCli = struct {
     }
 
     pub fn get_package_details(self: ShellyCli, name: []const u8) !std.json.Parsed(Package) {
-        const result = try self.run(&.{ "search", "standard", "--detail", name });
+        const result = try self.run(&.{ "-Ssdi", name });
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
@@ -337,8 +338,19 @@ pub const ShellyCli = struct {
         return error.NoDataFrame;
     }
 
+    pub const PkgbuildFetchMode = enum { preview, atoll_preview, atoll_scan };
+
     pub fn fetch_pkgbuild(self: ShellyCli, name: []const u8) !std.json.Parsed([]PkgBuild) {
-        const result = try self.run(&.{ "search", "aur", name, "--pkgbuild" });
+        return self.fetchPkgbuild(name, .preview);
+    }
+
+    pub fn fetchPkgbuild(self: ShellyCli, name: []const u8, mode: PkgbuildFetchMode) !std.json.Parsed([]PkgBuild) {
+        const args: []const []const u8 = switch (mode) {
+            .preview => &.{ "search", "aur", name, "--pkgbuild" },
+            .atoll_preview => &.{ "search", "aur", name, "--pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org" },
+            .atoll_scan => &.{ "search", "aur", name, "--pkgbuild", "--scan-pkgbuild", "--aur-url", "https://atoll.seafoam-labs.org" },
+        };
+        const result = try self.run(args);
         defer self.allocator.free(result.stderr);
         defer self.allocator.free(result.stdout);
 

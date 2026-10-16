@@ -152,7 +152,7 @@ pub const QuestionPurpose = enum {
     generic,
     cache_clean_extra_entries,
     package_conflict,
-}; 
+};
 
 pub const QuestionAttachment = struct {
     name: []const u8,
@@ -252,6 +252,10 @@ pub const QuestionRequest = struct {
     dependency_name: ?[]const u8 = null,
     pgp_key_import: ?PgpKeyImportPayload = null,
     default_response: QuestionResponse = .default,
+    /// Optional nonblocking atomic cancellation probe, borrowed until ask returns.
+    /// It must not reenter this context; it can run while its mutex is held.
+    /// Deferred waits poll this every 10ms without holding the context mutex.
+    cancellation: ?struct { data: ?*anyopaque, check: *const fn (?*anyopaque) bool } = null,
 };
 
 pub const Question = struct {
@@ -515,6 +519,7 @@ pub const OperationContext = struct {
 
     fn ask(self: *OperationContext, envelope: Envelope, request: QuestionRequest) !OwnedQuestionResponse {
         if (self.isCancelled()) return error.Cancelled;
+        if (request.cancellation) |probe| if (probe.check(probe.data)) return error.Cancelled;
         const id = self.next_question_id.fetchAdd(1, .monotonic);
 
         self.mutex.lockUncancelable(self.io);
@@ -555,6 +560,8 @@ pub const OperationContext = struct {
             request.default_response;
 
         if (immediate != .deferred) {
+            if (self.isCancelled()) return error.Cancelled;
+            if (request.cancellation) |probe| if (probe.check(probe.data)) return error.Cancelled;
             var result = try OwnedQuestionResponse.init(self.allocator, immediate);
             errdefer result.deinit(self.allocator);
             self.mutex.lockUncancelable(self.io);
@@ -570,16 +577,18 @@ pub const OperationContext = struct {
         defer self.mutex.unlock(self.io);
         while (true) {
             const pending = self.pending_questions.getPtr(id) orelse return error.UnknownQuestion;
+            if (self.isCancelled() or (if (request.cancellation) |probe| probe.check(probe.data) else false)) return error.Cancelled;
             if (pending.response) |response| {
                 pending.response = null;
                 _ = self.pending_questions.remove(id);
                 return response;
             }
-            if (self.isCancelled()) {
-                _ = self.pending_questions.remove(id);
-                return error.Cancelled;
-            }
-            self.question_condition.waitUncancelable(self.io, &self.mutex);
+            if (request.cancellation != null) {
+                self.mutex.unlock(self.io);
+                const slept = std.Io.sleep(self.io, .fromMilliseconds(10), .awake);
+                self.mutex.lockUncancelable(self.io);
+                slept catch return error.Cancelled;
+            } else self.question_condition.waitUncancelable(self.io, &self.mutex);
         }
     }
 
@@ -606,13 +615,23 @@ pub const OperationContext = struct {
     }
 };
 
+/// Borrowed by an optional operation and its children until they all finish.
+/// Report the first failure with context, without repeating it as it unwinds.
+pub const RecoverableErrors = struct {
+    message: []const u8,
+    reported: std.atomic.Value(bool) = .init(false),
+};
+
 pub const Operation = struct {
     context: *OperationContext,
     envelope: Envelope,
     completed: bool = false,
+    recoverable_errors: ?*RecoverableErrors = null,
 
     pub fn child(self: *const Operation, descriptor: OperationDescriptor) Operation {
-        return self.context.beginChild(self.envelope.operation_id, descriptor);
+        var operation = self.context.beginChild(self.envelope.operation_id, descriptor);
+        operation.recoverable_errors = self.recoverable_errors;
+        return operation;
     }
 
     pub fn status(
@@ -656,13 +675,27 @@ pub const Operation = struct {
         native_code: ?i64,
         recoverable: bool,
     ) void {
+        var is_recoverable = recoverable;
+        var contextual_message: ?[]u8 = null;
+        defer if (contextual_message) |owned| self.context.allocator.free(owned);
+        var reported_message = message;
+        if (self.recoverable_errors) |recovery| {
+            if (err == error.Cancelled or err == error.OutOfMemory or self.isCancelled()) {
+                is_recoverable = false;
+            } else {
+                if (recovery.reported.swap(true, .acq_rel)) return;
+                is_recoverable = true;
+                contextual_message = std.fmt.allocPrint(self.context.allocator, "{s}\n{s}", .{ recovery.message, message }) catch null;
+                reported_message = contextual_message orelse recovery.message;
+            }
+        }
         self.context.emit(.{ .failure = .{
             .envelope = self.envelope,
             .err = err,
-            .message = message,
+            .message = reported_message,
             .domain = domain,
             .native_code = native_code,
-            .recoverable = recoverable,
+            .recoverable = is_recoverable,
         } });
     }
 
@@ -718,6 +751,51 @@ test "operation context emits correlated parent and child events" {
     try std.testing.expectEqual(@as(usize, 4), capture.count);
     try std.testing.expectEqual(parent.envelope.operation_id, capture.parents[1].?);
     try std.testing.expectEqual(capture.ids[1], capture.ids[2]);
+}
+
+test "optional operation errors inherit recovery without masking required work or cancellation" {
+    const Capture = struct {
+        warnings: usize = 0,
+        failures: usize = 0,
+        contextual: bool = false,
+        fn event(data: ?*anyopaque, value: Event) void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            if (value == .failure) {
+                if (value.failure.recoverable) {
+                    self.warnings += 1;
+                    self.contextual = std.mem.indexOf(u8, value.failure.message, "optional tool for editor") != null;
+                } else self.failures += 1;
+            }
+        }
+    };
+    var context = OperationContext.init(std.testing.allocator, std.testing.io);
+    defer context.deinit();
+    var capture: Capture = .{};
+    _ = try context.subscribe(.{ .function = Capture.event, .data = &capture });
+    var parent = context.begin(.{ .backend = .aur, .kind = .update });
+    defer parent.finish(.success);
+    var recovery: RecoverableErrors = .{ .message = "optional tool for editor" };
+    {
+        var optional = parent.child(.{ .backend = .aur, .kind = .install });
+        defer optional.finish(.failed);
+        optional.recoverable_errors = &recovery;
+        var download = optional.child(.{ .backend = .download, .kind = .download });
+        defer download.finish(.failed);
+        download.reportError(error.Timeout, "Request timed out", "aur-http", null, false);
+        optional.reportError(error.AurRpcLookupFailed, "Lookup failed", "aur", null, false);
+        try std.testing.expectEqual(@as(usize, 1), capture.warnings);
+        try std.testing.expect(capture.contextual);
+        try std.testing.expectEqual(@as(usize, 0), capture.failures);
+        download.reportError(error.OutOfMemory, "Allocation failed", null, null, true);
+        download.reportError(error.Cancelled, "Cancelled", null, null, true);
+        try std.testing.expectEqual(@as(usize, 2), capture.failures);
+    }
+    var required = parent.child(.{ .backend = .aur, .kind = .install });
+    defer required.finish(.failed);
+    try std.testing.expect(required.recoverable_errors == null);
+    required.reportError(error.BuildFailed, "Build failed", "aur", null, false);
+    try std.testing.expectEqual(@as(usize, 3), capture.failures);
+    try std.testing.expectEqual(@as(usize, 1), capture.warnings);
 }
 
 test "operation context supports immediate and deferred question responses" {

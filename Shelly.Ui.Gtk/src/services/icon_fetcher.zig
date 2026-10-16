@@ -1,7 +1,9 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const Io = std.Io;
 const flate = std.compress.flate;
 const runtime = @import("runtime.zig");
+const xdg_paths = @import("xdg_paths.zig").xdg_paths;
 const RELEASE_URL = "https://api.github.com/repos/Seafoam-Labs/shelly-icon-stream/releases/latest";
 const USER_AGENT = "shelly-notifications";
 
@@ -23,12 +25,24 @@ pub const IconDownloadService = struct {
         return .{ .allocator = allocator, .io = io };
     }
 
+    fn cache_folder(self: *IconDownloadService) ![]u8 {
+        const a = self.allocator;
+        const data_home = try xdg_paths.xdgDataHome(a, runtime.environ_map);
+        defer a.free(data_home);
+        return std.fs.path.join(a, &.{ data_home, "shelly-icons" });
+    }
+
+    fn remove_cached_icons(self: *IconDownloadService) !void {
+        const icon_folder = try self.cache_folder();
+        defer self.allocator.free(icon_folder);
+        try Io.Dir.cwd().deleteTree(self.io, icon_folder);
+    }
+
     fn download_unpack_icons(self: *IconDownloadService) !bool {
         const a = self.allocator;
         const io = self.io;
 
-        const home = runtime.environ_map.get("HOME") orelse return error.NoHome;
-        const icon_folder = try std.fs.path.join(a, &.{ home, ".local/share/shelly-icons" });
+        const icon_folder = try self.cache_folder();
         defer a.free(icon_folder);
 
         var dir = try Io.Dir.cwd().createDirPathOpen(io, icon_folder, .{});
@@ -105,7 +119,7 @@ pub const IconDownloadService = struct {
             .response_writer = &aw.writer,
         });
         if (result.status != .ok) {
-            std.debug.print("Could not download application icons from {0f}: the server returned HTTP {1d}.\n", .{ @import("diagnostics").safe(url), @intFromEnum(result.status) });
+            std.debug.print("Could not download application icons from {0f}: the server returned HTTP {1d}.\n", .{ diagnostics.safe(url), @intFromEnum(result.status) });
             return error.HttpError;
         }
         return aw.toOwnedSlice();
@@ -119,17 +133,23 @@ fn unpack(io: Io, dir: Io.Dir, tar_gz: []const u8) !void {
     try std.tar.extract(io, dir, &dec.reader, .{});
 }
 
-pub fn downloadIconsInBackground(allocator: std.mem.Allocator, io: Io) void {
-    const thread = std.Thread.spawn(.{}, worker, .{ allocator, io }) catch |e| {
-        std.debug.print("Could not start downloading application icons. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(e), @errorName(e) });
+pub fn downloadIconsInBackground(allocator: std.mem.Allocator, io: Io, icons_enabled: bool) void {
+    const thread = std.Thread.spawn(.{}, worker, .{ allocator, io, icons_enabled }) catch |e| {
+        std.debug.print("Could not start downloading application icons. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(e), @errorName(e) });
         return;
     };
     thread.detach();
 }
 
-fn worker(allocator: std.mem.Allocator, io: Io) void {
+fn worker(allocator: std.mem.Allocator, io: Io, icons_enabled: bool) void {
     var svc = IconDownloadService.init(allocator, io);
+    if (!icons_enabled) {
+        svc.remove_cached_icons() catch |e| {
+            std.debug.print("Could not remove the cached application icons. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(e), @errorName(e) });
+        };
+        return;
+    }
     _ = svc.download_unpack_icons() catch |e| {
-        std.debug.print("Could not download application icons. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(e), @errorName(e) });
+        std.debug.print("Could not download application icons. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(e), @errorName(e) });
     };
 }

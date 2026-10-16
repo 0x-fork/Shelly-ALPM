@@ -6,6 +6,7 @@ const glib = bindings.glib;
 const gobject = bindings.gobject;
 const c_string = @import("../helpers/c_string.zig");
 const support = @import("support.zig");
+const runtime = @import("../services/runtime.zig");
 const ShellyCli = @import("../services/shelly_cli.zig").ShellyCli;
 const Package = @import("../models/packages.zig").Package;
 const SizeConverter = @import("../helpers/size_converts.zig").SizeConverter;
@@ -13,6 +14,7 @@ const ShellyWindow = @import("../shelly_window.zig").ShellyWindow;
 const Option = @import("../services/shelly_operation.zig").Option;
 const MultiSelectDialog = @import("../dialog/page/multiselect.zig").MultiSelectDialog;
 const translations = @import("../helpers/translations.zig");
+const a11y = @import("../helpers/a11y.zig");
 
 pub const PackageDetail = extern struct {
     parent_instance: Parent,
@@ -120,10 +122,14 @@ pub const PackageDetail = extern struct {
         @memset(&p.pending_name, 0);
         @memcpy(p.pending_name[0..len], name[0..len]);
         p.pending_len = len;
-        if (icon_path) |path| {
-            gtk.Image.setFromFile(p.icon, path);
-        } else {
-            gtk.Image.setFromIconName(p.icon, "package-x-generic");
+        const icons_on = runtime.shellyIconsEnabled();
+        gtk.Widget.setVisible(p.icon.as(gtk.Widget), @intFromBool(icons_on));
+        if (icons_on) {
+            if (icon_path) |path| {
+                gtk.Image.setFromFile(p.icon, path);
+            } else {
+                gtk.Image.setFromIconName(p.icon, "package-x-generic");
+            }
         }
         var buf: [256]u8 = undefined;
         gtk.Label.setLabel(p.name_label, c_string.cstr(&buf, name));
@@ -424,6 +430,7 @@ pub const PackageDetail = extern struct {
         if (!installed) return;
         const icon = gtk.Image.newFromIconName("object-select-symbolic");
         gtk.Widget.setTooltipText(icon.as(gtk.Widget), translations._("Installed"));
+        a11y.setName(icon.as(gtk.Widget), translations._("Installed"));
         gtk.Box.append(row, icon.as(gtk.Widget));
     }
 

@@ -12,7 +12,16 @@
 
 ## About
 
-Shelly is a modern package manager for Arch Linux designed to be a more user-friendly alternative. Offering a visual interface with a focus on user experience and ease of use. Shelly interfaces directly with `libalpm`. It is a complete reimagination of how a user interacts with their Arch Linux system, providing a more intuitive experience.
+Shelly is a modern package manager for Arch Linux designed to be a more user-friendly alternative. Offering a visual interface with a focus on user experience and ease of use. Shelly supports native package operations through `libalpm` or `Shelly.Rlpm`, with libalpm selected by default. It is a complete reimagination of how a user interacts with their Arch Linux system, providing a more intuitive experience.
+
+## Native backend selection
+
+Default builds include both engines. Select RLPM with
+`shelly config set NativePackageBackend rlpm`, or restore libalpm with
+`shelly config set NativePackageBackend libalpm`. Build the CLI with
+`zig build -Dlibalpm=false` for an RLPM-only binary. See the
+[backend guide](https://seafoam-labs.org/shelly-alpm/docs/rlpm/) for defaults, packaging,
+verification and the remaining release acceptance gates.
 
 ## Quick Install
 
@@ -59,7 +68,7 @@ paru -Rns shelly
 ## Features
 
 - **Modern-CLI**: Provides a command-line interface for advanced users and automation, with a focus on ease of use.
-- **Native Arch Integration**: Directly interacts with `libalpm` for accurate and fast package management.
+- **Native Arch Integration**: Configurable libalpm or RLPM backend, retaining CachyOS extensions.
 - **Native Wayland Support**: Front end built using GTK4.
 - **Package Management**: Supports searching and filtering for, installing, updating, and removing packages.
 - **Repository Management**: Synchronizes with official repositories to keep package lists up to date.
@@ -80,6 +89,37 @@ When an unavailable AUR package has an exact match in a configured repository,
 Shelly suggests `shelly -Is <package>`. Explicit local builds with
 `shelly build /path/to/PKGBUILD` and removal of installed packages remain
 available without an AUR availability check.
+
+To build an AUR package in a fresh native build root before installing it:
+
+```bash
+shelly -Ia --isolated <package>
+```
+
+Repository build dependencies stay in the guest; the exported package and its
+runtime dependencies are installed on the host. This also supports `--needed`
+and `--version`. As with `shelly build --isolated`, AUR-only build dependencies
+and package signing are not yet supported. `--isolated` cannot be combined with
+`--chroot` or dependency-only installation. See [isolated builds](https://seafoam-labs.org/shelly-alpm/docs/build/#isolated-container-builds--i---isolated)
+for requirements and limitations.
+
+## CLI file size display
+
+To select units automatically in CLI size listings and transaction summaries:
+
+```bash
+shelly config set FileSizeDisplay Auto
+```
+
+`Auto` uses B, KiB, MiB, GiB, or TiB according to the magnitude. Bytes are shown
+as integers; larger units are rounded to two decimal places. Negative size
+changes retain their sign. Values that round to 1024 in a scaled unit are
+shown in the next unit, up to TiB.
+
+The existing `Bytes`, `Megabytes` (MiB), and `Gigabytes` (GiB) options remain
+available. `Megabytes` remains the default; restore it with
+`shelly config set FileSizeDisplay Megabytes`. This setting affects human-readable
+CLI output; structured output keeps numeric byte counts.
 
 ## PKGBUILD review
 
@@ -143,8 +183,8 @@ cleanup behavior with `shelly config set DisableCacheClean false`.
 Standalone `shelly upgrade standard` keeps its existing cleanup behavior.
 You can still clean the cache manually with `shelly purify standard --cache`.
 
-Add `--aur-cache` to also delete **all** built AUR package archives and their
-matching signatures from the invoking user's `$XDG_CACHE_HOME/Shelly` cache
+Add `--aur-cache` to also delete **everything inside** the invoking user's
+`$XDG_CACHE_HOME/Shelly` cache
 (default: `~/.cache/Shelly`):
 
 ```bash
@@ -152,11 +192,18 @@ shelly purify standard --cache --aur-cache --dry-run
 shelly purify standard --cache --aur-cache
 ```
 
-The command previews the files and asks for confirmation before deleting them.
+The command previews each cache entry and asks for confirmation before deleting
+it. Previewed directories are removed with all their contents, including AUR
+PKGBUILDs, checkout history, sources, build trees, package archives, and metadata.
+This also removes caches for packages that are no longer installed. The cache
+root directory is retained; symlinks are removed without following their targets.
+Files outside Shelly's cache are not included.
+
 `--aur-cache` can also be used without `--cache`; standard purify still checks
-for corrupted archives. AUR PKGBUILDs, checkout history, source files, and build
-directories are retained. Archives in custom build output destinations outside
-Shelly's cache are not included.
+for corrupted archives. The `--cache` retention count applies only to repository
+package archives, not to Shelly's cache. The UI's **Clean Package Cache** action
+performs both operations and clears the entire Shelly cache regardless of the
+selected repository retention count.
 
 ## Roadmap
 
@@ -171,7 +218,7 @@ Upcoming features and development targets:
 - **Arch Linux** (or an Arch-based distribution)
 - **zig 0.16.0** (for building)
 - **vala** (for building)
-- **libalpm** (provided by `pacman`)
+- **libalpm** (provided by `pacman`; omitted from the CLI build with `-Dlibalpm=false`)
 
 ### Optional Prerequisites
 
@@ -241,7 +288,7 @@ CLI provides the same core functionality as the UI but in a scriptable, terminal
 
 ### CLI Commands
 
-Full documentation can be viewed on the [Shelly CLI Reference](https://www.seafoam-labs.org/shelly-alpm/docs/cli-reference/) page.
+Full documentation can be viewed on the [Shelly CLI Reference](https://seafoam-labs.org/shelly-alpm/docs/cli-reference/) page.
 
 Standard searches show available repository packages by default, with ranked
 matches for a query or a paginated listing when no query is supplied:
@@ -299,6 +346,12 @@ coordinator installs the built archives after the build completes. Like
 `makepkg -i`, the install transaction adds only the built archives, so
 combine it with `--sync-deps` when the package's dependencies may be missing.
 
+Choose package compression with `shelly build --compression-level 3` (also
+supported with `--isolated`). Presets 1–5 range from conservative resource use
+to maximum compression effort. Set `package.compression_level` in
+`shellybuild.conf` for a persistent preference; omission preserves library
+defaults. See the [preset mappings and tradeoffs](docs/shellybuild.conf.md#package-compression).
+
 Versioned JSON contracts for unattended package-building services are
 available. Probe an installed binary with `shelly --version --json` before
 scheduling a build.
@@ -328,7 +381,7 @@ default configuration file at:
 
 #### Configuration Options
 
-These are listed on the [Shelly Configuration](https://www.seafoam-labs.org/shelly-alpm/docs/config/) page.
+These are listed on the [Shelly Configuration](https://seafoam-labs.org/shelly-alpm/docs/config/) page.
 
 ## Development
 
@@ -340,7 +393,7 @@ Shelly is structured into several components:
   libflatpak/GLib-native implementation details.
 - **Shelly.Http**: Standalone HTTP client with a compatibility TLS implementation.
 - **Shelly-Notifications**: Tray service to manage notifactions the Shelly-UI.
-- **Shelly.PackageManager**: Core libalpm/AUR/AppImage logic plus the
+- **Shelly.PackageManager**: Configurable libalpm/RLPM plus AUR/AppImage logic plus the
   backend-neutral Flatpak facade and secure loader.
 
 ### Building for Development

@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const ConfigResolver = @import("ui_config_resolver.zig").ConfigResolver;
 const cli_config_resolver = @import("cli_config_resolver.zig");
 const xdg_paths = @import("xdg_paths.zig");
@@ -31,6 +32,7 @@ pub const PendingNavigation = union(enum) {
     page: deep_link.PageTarget,
     flatpak_app: PendingApp,
     local_flatpak_file: PendingLocalFile,
+    local_appimage_file: PendingLocalFile,
 };
 
 pub var pending_navigation: ?PendingNavigation = null;
@@ -58,6 +60,15 @@ pub fn queueLocalFlatpakPath(path: []const u8) void {
     pending_navigation = .{ .local_flatpak_file = pending };
 }
 
+pub fn queueLocalAppImagePath(path: []const u8) void {
+    if (path.len == 0 or path.len > deep_link.max_file_path_len) return;
+    var pending: PendingLocalFile = undefined;
+    @memcpy(pending.buffer[0..path.len], path);
+    pending.buffer[path.len] = 0;
+    pending.len = path.len;
+    pending_navigation = .{ .local_appimage_file = pending };
+}
+
 pub fn takePendingNavigation() ?PendingNavigation {
     const pending = pending_navigation;
     pending_navigation = null;
@@ -65,6 +76,12 @@ pub fn takePendingNavigation() ?PendingNavigation {
 }
 
 pub var config: ?*ConfigResolver = null;
+
+pub fn shellyIconsEnabled() bool {
+    const svc = config orelse return true;
+    const cfg = svc.get() catch return true;
+    return cfg.ShellyIconsEnabled;
+}
 
 pub fn setup(init: std.process.Init) void {
     io = init.io;
@@ -89,7 +106,7 @@ pub fn setupConfig(allocator: std.mem.Allocator) !*ConfigResolver {
 
 fn migrateLegacyAppImageInstallPath(allocator: std.mem.Allocator) void {
     var resolver = cli_config_resolver.CliConfigResolver.init(allocator, io, environ_map) catch |err| {
-        std.log.warn("Could not read the CLI settings during AppImage settings migration. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+        std.log.warn("Could not read the CLI settings during AppImage settings migration. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
         return;
     };
     defer resolver.deinit();

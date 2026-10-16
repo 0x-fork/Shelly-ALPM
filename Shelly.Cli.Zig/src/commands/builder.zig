@@ -1,20 +1,24 @@
 const std = @import("std");
-const Zigalpm = @import("Zigalpm");
+const diagnostics = @import("diagnostics");
+const PackageManager = @import("PackageManager");
 const runtime = @import("../runtime/context.zig");
 const elevation = @import("../runtime/elevation.zig");
 const parser = @import("../cli/parser.zig");
 const test_support = @import("test_support.zig");
-const PackageBuilder = Zigalpm.builder.PackageBuilder;
+const PackageBuilder = PackageManager.builder.PackageBuilder;
 const standard_single_pane = @import("../output/standard_single_pane.zig");
 const ui_operation = @import("../output/ui_operation.zig");
-const ShellyBuildConfiguration = Zigalpm.builder.ShellyBuildConfiguration;
+const ShellyBuildConfiguration = PackageManager.builder.ShellyBuildConfiguration;
 const aur_url = @import("../config/aur_url.zig");
 const isolated_build = @import("isolated_build.zig");
 const source_pgp_transport = @import("source_pgp_transport.zig");
 const signals = @import("../runtime/signals.zig");
 const install_command = @import("install.zig");
 
+const build_plan = PackageManager.Manager.build_plan;
+
 const command_path = "shelly build build";
+const compression_policy = PackageManager.shared.archive.compression_policy;
 
 pub const BuildCommandArtifact = struct {
     package_name: []u8,
@@ -39,6 +43,7 @@ pub const BuildCommandError = struct {
 pub const BuildCommandResult = struct {
     package_base: []u8,
     review_digest: ?[std.crypto.hash.sha2.Sha256.digest_length]u8,
+    dependency_plan_digest: ?[32]u8 = null,
     isolated: bool,
     artifacts: []BuildCommandArtifact,
     failure: ?BuildCommandError = null,
@@ -57,7 +62,7 @@ pub fn dispatch(
     invocation: *const parser.Invocation,
 ) !?u8 {
     if (!std.mem.eql(u8, invocation.command.path, command_path)) return null;
-    var diagnostic: ?Zigalpm.pkgbuild.parser.Diagnostic = null;
+    var diagnostic: ?PackageManager.pkgbuild.parser.Diagnostic = null;
     const previous_diagnostic = context.preparation_diagnostic;
     context.preparation_diagnostic = &diagnostic;
     defer {
@@ -65,6 +70,19 @@ pub fn dispatch(
         if (diagnostic) |*value| value.deinit();
     }
 
+    _ = compressionOverride(invocation) catch |err|
+        return try reportConfigurationError(context, invocation, err);
+
+    if (optionEnabled(invocation, "--resolve-dependencies")) {
+        if (!optionEnabled(invocation, "--isolated") or !invocation.globals.json or installRequested(invocation) or
+            optionEnabled(invocation, "--sync-deps") or optionValue(invocation, "--review-digest") != null or
+            optionEnabled(invocation, "--review-only") or optionEnabled(invocation, "--makesrcinfo") or
+            optionValue(invocation, "--dependency-plan") != null)
+            return try reportConfigurationError(context, invocation, error.InvalidDependencyPlanOptions);
+        return try executeReviewOnly(context, invocation);
+    }
+    if (optionValue(invocation, "--dependency-plan") != null and !optionEnabled(invocation, "--isolated"))
+        return try reportConfigurationError(context, invocation, error.InvalidDependencyPlanOptions);
     if (installRequested(invocation)) {
         if (installOutputModeConflict(invocation)) |conflict| {
             try context.stderr.print("Cannot combine --install with {s}.\n", .{conflict});
@@ -78,7 +96,17 @@ pub fn dispatch(
         return try executeMakeSrcinfo(context, invocation);
     if (optionEnabled(invocation, "--prepare-isolated-source-keys"))
         return try executeSourcePgpKeyPreparation(context, invocation);
+    if (optionValue(invocation, "--apply-pkgver") != null) {
+        var operations = PackageManager.OperationContext.init(context.allocator, context.io);
+        defer operations.deinit();
+        try applyIsolatedPkgver(context, &operations, invocation);
+        return 0;
+    }
     if (shouldElevateBuildCoordinator(invocation, elevation.isRoot())) {
+        // Validate compression before asking for privileges or installing deps.
+        const configuration = loadBuildConfiguration(context, invocation) catch |err|
+            return try reportConfigurationError(context, invocation, err);
+        configuration.deinit();
         const elevated_arguments = try aur_url.argumentsWithEffectiveBase(context, invocation);
         defer context.allocator.free(elevated_arguments);
         if (isolatedRequested(invocation)) {
@@ -87,7 +115,7 @@ pub fn dispatch(
                 elevated_arguments,
                 invocation.globals.json,
             ) catch |err| {
-                try context.stderr.print("Could not obtain administrator privileges for the isolated build. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+                try context.stderr.print("Could not obtain administrator privileges for the isolated build. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
                 if (invocation.globals.json) {
                     try writeBuildJson(context.stdout, null, err, true);
                     try context.stdout.writeByte('\n');
@@ -103,7 +131,7 @@ pub fn dispatch(
             }
         } else {
             const elevated_exit = elevation.relaunchIfNeeded(context, elevated_arguments) catch |err| {
-                try context.stderr.print("Could not obtain administrator privileges for the build. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+                try context.stderr.print("Could not obtain administrator privileges for the build. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
                 return 1;
             };
             if (elevated_exit) |exit_code| return exit_code;
@@ -281,7 +309,7 @@ fn parseArtifactReport(
 fn reportArtifactProtocolFailure(context: *runtime.RuntimeContext, err: anyerror) !void {
     try context.stderr.print(
         "The build completed but its artifact report could not be read, so the built packages were not installed. {0s}\n\nTechnical details: {1s}\n",
-        .{ @import("diagnostics").cause(err), @errorName(err) },
+        .{ diagnostics.cause(err), @errorName(err) },
     );
     try context.stderr.flush();
 }
@@ -330,8 +358,9 @@ fn isCancellationBuildJson(allocator: std.mem.Allocator, document: []const u8) b
 const ReviewOnlyResult = struct {
     package_base: []u8,
     package_names: [][]u8,
-    review: Zigalpm.builder.PreparedPkgbuildReview,
+    review: PackageManager.builder.PreparedPkgbuildReview,
     dependency_plan: ?SyncDependencyPlan = null,
+    environment_plan: ?build_plan.Plan = null,
     // Owned by the review arena; used only by the internal key-preparation child.
     source_pgp_fingerprints: []const []const u8 = &.{},
 
@@ -350,9 +379,9 @@ const CapturedReview = struct {
     package_base: []const u8,
     package_names: []const []const u8,
     digest: [std.crypto.hash.sha2.Sha256.digest_length]u8,
-    findings: []Zigalpm.OperationReviewFinding,
-    attachments: []Zigalpm.OperationQuestionAttachment,
-    reviewed_files: []Zigalpm.builder.pkgbuild_review.ReviewedFile,
+    findings: []PackageManager.OperationReviewFinding,
+    attachments: []PackageManager.OperationQuestionAttachment,
+    reviewed_files: []PackageManager.builder.pkgbuild_review.ReviewedFile,
     repository_dependencies: []const []const u8,
     aur_dependencies: []const []const u8,
 
@@ -387,7 +416,7 @@ fn sourcePgpPreparationArguments(allocator: std.mem.Allocator, invocation: *cons
     return arguments.toOwnedSlice(allocator);
 }
 
-fn captureSourcePgpKeys(context: *runtime.RuntimeContext, operation_context: *Zigalpm.OperationContext, invocation: *const parser.Invocation, pkgbuild_path: []const u8, digest: Zigalpm.builder.pkgbuild_review.Digest) ![]u8 {
+fn captureSourcePgpKeys(context: *runtime.RuntimeContext, operation_context: *PackageManager.OperationContext, invocation: *const parser.Invocation, pkgbuild_path: []const u8, digest: PackageManager.builder.pkgbuild_review.Digest) ![]u8 {
     const digest_hex = std.fmt.bytesToHex(digest, .lower);
     const arguments = try sourcePgpPreparationArguments(context.allocator, invocation, pkgbuild_path, &digest_hex);
     defer context.allocator.free(arguments);
@@ -406,7 +435,7 @@ fn captureSourcePgpKeys(context: *runtime.RuntimeContext, operation_context: *Zi
 }
 
 fn executeSourcePgpKeyPreparation(context: *runtime.RuntimeContext, invocation: *const parser.Invocation) !u8 {
-    var operation_context = Zigalpm.OperationContext.init(context.allocator, context.io);
+    var operation_context = PackageManager.OperationContext.init(context.allocator, context.io);
     defer operation_context.deinit();
     var cancellation_watcher: signals.CancellationWatcher = .{};
     try cancellation_watcher.start(context.io, &operation_context);
@@ -419,7 +448,7 @@ fn executeSourcePgpKeyPreparation(context: *runtime.RuntimeContext, invocation: 
     try renderer.attach(&operation_context);
     try renderer.begin("Preparing isolated source-signing keys...");
     const keys = prepareSourcePgpKeyExport(context, invocation, &operation_context) catch |err| {
-        const message = try Zigalpm.user_errors.format(context.allocator, err, .{ .operation = "source-signing key preparation" });
+        const message = try PackageManager.user_errors.format(context.allocator, err, .{ .operation = "source-signing key preparation" });
         defer context.allocator.free(message);
         if (!renderer.reported_failure.load(.acquire)) try renderer.reportError(message);
         try renderer.finishWithMessage(false, "Could not prepare the source-signing keys for the requested package.");
@@ -436,13 +465,13 @@ fn executeSourcePgpKeyPreparation(context: *runtime.RuntimeContext, invocation: 
     return 0;
 }
 
-fn prepareSourcePgpKeyExport(context: *runtime.RuntimeContext, invocation: *const parser.Invocation, operation_context: *Zigalpm.OperationContext) ![]u8 {
+fn prepareSourcePgpKeyExport(context: *runtime.RuntimeContext, invocation: *const parser.Invocation, operation_context: *PackageManager.OperationContext) ![]u8 {
     const expected = try parseReviewDigest(optionValue(invocation, "--review-digest") orelse return error.MissingReviewDigest);
     var result = try prepareReviewOnly(context, operation_context, invocation);
     defer result.deinit(context.allocator);
     if (!std.mem.eql(u8, &expected, &result.review.digest)) return error.ReviewedPkgbuildChanged;
     var operation = operation_context.begin(.{ .backend = .aur, .kind = .build, .subject = result.package_base });
-    var completion: Zigalpm.OperationCompletionStatus = .failed;
+    var completion: PackageManager.OperationCompletionStatus = .failed;
     defer operation.finish(completion);
     ensureSourcePgpFingerprints(context, &operation, result.package_base, result.source_pgp_fingerprints) catch |err| {
         if (err == error.PgpKeyImportDeclined) {
@@ -458,16 +487,54 @@ fn prepareSourcePgpKeyExport(context: *runtime.RuntimeContext, invocation: *cons
     return keys;
 }
 
+/// Runs in an unprivileged host child. The original PKGBUILD hash authorizes
+/// evaluation; the full review digest also protects related inputs at commit.
+fn applyIsolatedPkgver(context: *runtime.RuntimeContext, operations: *PackageManager.OperationContext, invocation: *const parser.Invocation) !void {
+    try PackageManager.builder.secureBuilderProcess();
+    const version = optionValue(invocation, "--apply-pkgver") orelse return error.InvalidPackageVersion;
+    const expected_hash = try parseReviewDigest(optionValue(invocation, "--pkgver-original-sha256") orelse return error.MissingReviewDigest);
+    const expected_review = try parseReviewDigest(optionValue(invocation, "--review-digest") orelse return error.MissingReviewDigest);
+    const path = try std.Io.Dir.cwd().realPathFileAlloc(context.io, if (invocation.positionals.len == 0) "PKGBUILD" else invocation.positionals[0], context.allocator);
+    defer context.allocator.free(path);
+    const original = try std.Io.Dir.cwd().readFileAlloc(context.io, path, context.allocator, .limited(32 * 1024 * 1024));
+    defer context.allocator.free(original);
+    var current_hash: PackageManager.builder.pkgbuild_review.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(original, &current_hash, .{});
+    if (!std.mem.eql(u8, &expected_hash, &current_hash)) return error.ReviewedPkgbuildChanged;
+    const updated = try PackageManager.builder.pkgver_update.render(context.allocator, original, version);
+    defer context.allocator.free(updated);
+    var result = try prepareReviewOnly(context, operations, invocation);
+    defer result.deinit(context.allocator);
+    if (!std.mem.eql(u8, &expected_review, &result.review.digest)) return error.ReviewedPkgbuildChanged;
+    try result.review.verifyCurrent(context.allocator, context.io, path, std.fs.path.dirname(path).?);
+    if (!try PackageManager.builder.pkgver_update.write(context.allocator, context.io, path, original, updated)) {
+        try context.stderr.writeAll("PKGBUILD is not writable; the isolated package was built, but its version could not be saved to the host PKGBUILD.\n");
+        try context.stderr.flush();
+    }
+}
+
+fn isolatedPkgverArguments(allocator: std.mem.Allocator, invocation: *const parser.Invocation, path: []const u8, version: []const u8, original_hash: []const u8, review_digest: []const u8) ![]const []const u8 {
+    var arguments: std.ArrayList([]const u8) = .empty;
+    defer arguments.deinit(allocator);
+    try arguments.appendSlice(allocator, &.{ "build", "--coordinator-child", "--no-confirm", "--apply-pkgver", version, "--pkgver-original-sha256", original_hash, "--review-digest", review_digest });
+    for (invocation.options) |option| {
+        if (!std.mem.eql(u8, option.name, "--package")) continue;
+        try arguments.appendSlice(allocator, &.{ "--package", option.value orelse return error.MissingPackageName });
+    }
+    try arguments.append(allocator, path);
+    return arguments.toOwnedSlice(allocator);
+}
+
 fn executeReviewOnly(
     context: *runtime.RuntimeContext,
     invocation: *const parser.Invocation,
 ) !u8 {
     if (!invocation.globals.json) {
-        try context.stderr.writeAll("--review-only requires --json.\n");
+        try context.stderr.writeAll("Review and dependency resolution require --json.\n");
         try context.stderr.flush();
         return 2;
     }
-    if (optionEnabled(invocation, "--isolated") or
+    if ((optionEnabled(invocation, "--isolated") and !optionEnabled(invocation, "--resolve-dependencies")) or
         optionEnabled(invocation, "--sync-deps") or
         optionValue(invocation, "--review-digest") != null)
     {
@@ -477,14 +544,14 @@ fn executeReviewOnly(
         return 2;
     }
 
-    var owned_diagnostic: ?Zigalpm.pkgbuild.parser.Diagnostic = null;
+    var owned_diagnostic: ?PackageManager.pkgbuild.parser.Diagnostic = null;
     const previous_diagnostic = context.preparation_diagnostic;
     if (context.preparation_diagnostic == null) context.preparation_diagnostic = &owned_diagnostic;
     defer {
         context.preparation_diagnostic = previous_diagnostic;
         if (owned_diagnostic) |*value| value.deinit();
     }
-    var operation_context = Zigalpm.OperationContext.init(context.allocator, context.io);
+    var operation_context = PackageManager.OperationContext.init(context.allocator, context.io);
     context.attachTransactionLog(&operation_context);
     defer operation_context.deinit();
     var cancellation_watcher: signals.CancellationWatcher = .{};
@@ -505,7 +572,10 @@ fn executeReviewOnly(
         try renderer.reportError(detail);
         try renderer.finishWithMessage(false, "Could not review the PKGBUILD for the requested package.");
         context.stdout = stdout;
-        try writeBuildJsonWithDiagnostic(context.stdout, null, err, false, contextDiagnostic(context), contextLogPath(context));
+        if (optionEnabled(invocation, "--resolve-dependencies"))
+            try writeDependencyResolutionError(context.stdout, err)
+        else
+            try writeBuildJsonWithDiagnostic(context.stdout, null, err, false, contextDiagnostic(context), contextLogPath(context));
         try context.stdout.writeByte('\n');
         try context.stdout.flush();
         context.stdout = context.stderr;
@@ -514,16 +584,19 @@ fn executeReviewOnly(
     defer result.deinit(context.allocator);
     try renderer.finishWithMessage(true, "PKGBUILD review completed.");
     context.stdout = stdout;
-    try writeReviewOnlyJson(context.stdout, &result);
+    if (optionEnabled(invocation, "--resolve-dependencies")) {
+        var json: std.json.Stringify = .{ .writer = context.stdout };
+        try json.write(result.environment_plan.?);
+    } else try writeReviewOnlyJson(context.stdout, &result);
     try context.stdout.writeByte('\n');
     try context.stdout.flush();
     context.stdout = context.stderr;
-    return 0;
+    return if (optionEnabled(invocation, "--resolve-dependencies") and !result.environment_plan.?.complete) 1 else 0;
 }
 
 fn prepareReviewOnly(
     context: *runtime.RuntimeContext,
-    operation_context: *Zigalpm.OperationContext,
+    operation_context: *PackageManager.OperationContext,
     invocation: *const parser.Invocation,
 ) !ReviewOnlyResult {
     var operation = operation_context.begin(.{
@@ -531,7 +604,7 @@ fn prepareReviewOnly(
         .kind = .build,
         .subject = if (invocation.positionals.len == 0) "PKGBUILD" else invocation.positionals[0],
     });
-    var completion: Zigalpm.OperationCompletionStatus = .failed;
+    var completion: PackageManager.OperationCompletionStatus = .failed;
     defer operation.finish(completion);
     errdefer |err| {
         const message = preparationErrorMessage(context, err) catch null;
@@ -547,7 +620,7 @@ fn prepareReviewOnly(
         .limited(32 * 1024 * 1024),
     );
     defer context.allocator.free(content);
-    var static_review = try Zigalpm.builder.pkgbuild_review.prepareWithDiagnostic(
+    var static_review = try PackageManager.builder.pkgbuild_review.prepareWithDiagnostic(
         context.allocator,
         context.io,
         request.build_directory,
@@ -597,7 +670,7 @@ fn prepareReviewOnly(
     );
     var dependency_plan: ?SyncDependencyPlan = null;
     errdefer if (dependency_plan) |*plan| plan.deinit(context.allocator);
-    if (optionEnabled(invocation, "--review-dependencies")) {
+    if (optionEnabled(invocation, "--review-dependencies") and !optionEnabled(invocation, "--review-build-environment")) {
         var repositories = try ReviewRepositories.init(
             context,
             operation_context,
@@ -624,6 +697,10 @@ fn prepareReviewOnly(
             );
         }
     }
+    const environment_plan = if (optionEnabled(invocation, "--resolve-dependencies") or optionEnabled(invocation, "--review-build-environment"))
+        try prepareEnvironmentPlan(context, invocation, &request, builder.package_builds, final_review.digest, final_review.arena.allocator())
+    else
+        null;
     const package_names = try context.allocator.alloc([]u8, builder.package_builds.len);
     var copied_names: usize = 0;
     errdefer {
@@ -655,8 +732,63 @@ fn prepareReviewOnly(
         .package_names = package_names,
         .review = final_review,
         .dependency_plan = dependency_plan,
+        .environment_plan = environment_plan,
         .source_pgp_fingerprints = try source_pgp_fingerprints.toOwnedSlice(review_allocator),
     };
+}
+
+fn buildPolicyDigest(allocator: std.mem.Allocator, configuration: *const ShellyBuildConfiguration) ![]const u8 {
+    const bytes = try std.json.Stringify.valueAlloc(allocator, .{
+        .build = configuration.build,
+        .package = configuration.package,
+        .sandbox = configuration.sandbox,
+    }, .{});
+    defer allocator.free(bytes);
+    return build_plan.hashBytes(allocator, bytes);
+}
+
+fn prepareEnvironmentPlan(
+    context: *runtime.RuntimeContext,
+    invocation: *const parser.Invocation,
+    request: *const BuildRequest,
+    builds: []const PackageManager.pkgbuild.parser.Pkgbuild,
+    review_digest: [32]u8,
+    allocator: std.mem.Allocator,
+) !build_plan.Plan {
+    const policy_digest = try buildPolicyDigest(allocator, request.shellybuild);
+    var requirements: std.ArrayList(build_plan.Requirement) = .empty;
+    for (PackageManager.Manager.bootstrap.build_root.packages) |target|
+        try requirements.append(allocator, .{ .requirement = target, .role = .bootstrap });
+    const resolver = PackageManager.aur.dependency_resolver;
+    for (builds) |build| {
+        for (build.parsed_global_depends orelse &.{}) |dep|
+            try requirements.append(allocator, .{ .requirement = try resolver.formatDependency(allocator, dep), .role = .runtime });
+        for (build.parsed_make_depends orelse &.{}) |dep|
+            try requirements.append(allocator, .{ .requirement = try resolver.formatDependency(allocator, dep), .role = .build });
+        if (!request.no_check) for (build.parsed_check_depends orelse &.{}) |dep|
+            try requirements.append(allocator, .{ .requirement = try resolver.formatDependency(allocator, dep), .role = .check });
+    }
+    // No operation/UI handlers: the isolated provider policy is deterministic
+    // native repository order, with no optional dependency selection.
+    var planner_operations = PackageManager.OperationContext.init(context.allocator, context.io);
+    defer planner_operations.deinit();
+    var watcher: signals.CancellationWatcher = .{};
+    try watcher.start(context.io, &planner_operations);
+    defer watcher.deinit();
+    var repositories = try ReviewRepositories.init(context, &planner_operations, false, null);
+    defer repositories.deinit(context);
+    _ = invocation;
+    return build_plan.resolve(allocator, context.io, repositories.manager, .{
+        .reviewDigest = try allocator.dupe(u8, &std.fmt.bytesToHex(review_digest, .lower)),
+        .configurationDigest = try allocator.dupe(u8, &repositories.configuration_digest),
+        .buildPolicyDigest = policy_digest,
+        .backend = @tagName(repositories.manager.backend()),
+        .bootstrapProfile = if (PackageManager.Manager.bootstrap.build_root.rlpm_only) "rlpm-only" else "libalpm-enabled",
+        .architectures = try build_plan.targetArchitectures(allocator, repositories.manager.config),
+        .check = !request.no_check,
+        .repositories = &.{},
+        .requirements = try requirements.toOwnedSlice(allocator),
+    });
 }
 
 /// `--sync-deps` installs missing dependencies before the build. Dependency
@@ -743,7 +875,7 @@ fn executeJson(
     invocation: *const parser.Invocation,
     runner: anytype,
 ) !u8 {
-    var operation_context = Zigalpm.OperationContext.init(context.allocator, context.io);
+    var operation_context = PackageManager.OperationContext.init(context.allocator, context.io);
     context.attachTransactionLog(&operation_context);
     defer operation_context.deinit();
 
@@ -841,7 +973,7 @@ const SrcinfoReal = struct {
     pub fn run(
         self: *SrcinfoReal,
         context: *runtime.RuntimeContext,
-        operation_context: *Zigalpm.OperationContext,
+        operation_context: *PackageManager.OperationContext,
         invocation: *const parser.Invocation,
     ) !void {
         var request = try parseBuildRequest(context, invocation);
@@ -854,7 +986,7 @@ const SrcinfoReal = struct {
             .limited(32 * 1024 * 1024),
         );
         defer context.allocator.free(pkgbuild_content);
-        var review = try Zigalpm.builder.preparePkgbuildReview(
+        var review = try PackageManager.builder.preparePkgbuildReview(
             context.allocator,
             context.io,
             request.build_directory,
@@ -875,13 +1007,13 @@ const SrcinfoReal = struct {
             .kind = .build,
             .subject = request.pkgbuild_path,
         });
-        var completion: Zigalpm.OperationCompletionStatus = .failed;
+        var completion: PackageManager.OperationCompletionStatus = .failed;
         defer operation.finish(completion);
 
         if (!optionEnabled(invocation, "--reviewed") and reviewed_digest == null) {
             var answer = try operation.ask(.{
                 .kind = .review_changes,
-                .prompt = "Generate SRCINFO from this PKGBUILD?",
+                .prompt = "Generate SRCINFO?",
                 .review = .{
                     .subject = request.pkgbuild_path,
                     .findings = review.findings,
@@ -910,20 +1042,17 @@ const SrcinfoReal = struct {
             name.* = package_build.pkg_name orelse return error.MissingPackageName;
         const package_base = request.package_builds[0].variables.get("pkgbase") orelse
             requested_names[0];
-        const work_directory = if (request.shellybuild.destinations.build) |build_root|
-            try Zigalpm.builder.uniqueWorkDirectory(
-                context.allocator,
-                context.io,
-                build_root,
-                package_base,
-            )
-        else
-            try context.allocator.dupe(u8, request.build_directory);
+        // Source preparation replaces src/: always isolate metadata work from
+        // any existing build tree, even without a configured build root.
+        const work_directory = try PackageManager.builder.uniqueWorkDirectory(
+            context.allocator,
+            context.io,
+            request.shellybuild.destinations.build orelse request.build_directory,
+            package_base,
+        );
         defer context.allocator.free(work_directory);
-        const ephemeral_work_directory = request.shellybuild.destinations.build != null;
-        try ensureConfiguredWorkDirectory(context.io, ephemeral_work_directory, work_directory);
-        defer if (ephemeral_work_directory)
-            std.Io.Dir.cwd().deleteTree(context.io, work_directory) catch {};
+        try std.Io.Dir.cwd().createDirPath(context.io, work_directory);
+        defer std.Io.Dir.cwd().deleteTree(context.io, work_directory) catch {};
 
         const builder = try PackageBuilder.init(
             context.allocator,
@@ -935,13 +1064,13 @@ const SrcinfoReal = struct {
                 .start_directory = request.build_directory,
                 .work_directory = work_directory,
                 .package_destination = request.build_directory,
-                .source_destination = request.build_directory,
+                .source_destination = request.shellybuild.destinations.sources orelse request.build_directory,
                 .log_destination = request.build_directory,
                 .pkgbuild_path = request.pkgbuild_path,
                 .clean_after_success = true,
                 .overwrite = false,
                 .run_check = false,
-                .run_verify = false,
+                .run_verify = !optionEnabled(invocation, "--noverify"),
                 .reviewed_pkgbuild_digest = review.digest,
                 .review_digest_is_automation = reviewed_digest != null,
                 .install_scripts = review.install_scripts,
@@ -999,7 +1128,7 @@ const Real = struct {
         runDeferredCleanupOperation(context, invocation, &cleanup) catch |err| {
             context.stderr.print(
                 "Could not clean up the build dependencies. {0s}\n\nTechnical details: {1s}\n",
-                .{ @import("diagnostics").cause(err), @errorName(err) },
+                .{ diagnostics.cause(err), @errorName(err) },
             ) catch {};
             context.stderr.flush() catch {};
         };
@@ -1068,7 +1197,7 @@ const Real = struct {
     pub fn run(
         self: *Real,
         context: *runtime.RuntimeContext,
-        operation_context: *Zigalpm.OperationContext,
+        operation_context: *PackageManager.OperationContext,
         invocation: *const parser.Invocation,
     ) anyerror!void {
         var cancellation_watcher: signals.CancellationWatcher = .{};
@@ -1084,7 +1213,7 @@ const Real = struct {
         if (hostCoordinatorRequested(invocation))
             return runHostBuildCoordinator(self, context, operation_context, invocation);
 
-        try Zigalpm.builder.secureBuilderProcess();
+        try PackageManager.builder.secureBuilderProcess();
         const requested_path = if (invocation.positionals.len == 0) "PKGBUILD" else invocation.positionals[0];
         const pkgbuild_path = try std.Io.Dir.cwd().realPathFileAlloc(
             context.io,
@@ -1101,14 +1230,10 @@ const Real = struct {
             .subject = pkgbuild_path,
         });
 
-        var completion: Zigalpm.OperationCompletionStatus = .failed;
+        var completion: PackageManager.OperationCompletionStatus = .failed;
         defer operation.finish(completion);
 
-        const shellybuild = try ShellyBuildConfiguration.init(
-            context.io,
-            context.allocator,
-            context.environ,
-        );
+        const shellybuild = try loadBuildConfiguration(context, invocation);
         defer shellybuild.deinit();
 
         const pkgbuild_content = try std.Io.Dir.cwd().readFileAlloc(
@@ -1118,7 +1243,7 @@ const Real = struct {
             .limited(32 * 1024 * 1024),
         );
         defer context.allocator.free(pkgbuild_content);
-        const pkgbuild_parser = Zigalpm.pkgbuild.Parser{
+        const pkgbuild_parser = PackageManager.pkgbuild.Parser{
             .allocator = context.allocator,
             .io = context.io,
             .package_carch = shellybuild.build.carch,
@@ -1140,7 +1265,7 @@ const Real = struct {
             try requested_names.appendSlice(context.allocator, names.items);
 
         const package_builds = try context.allocator.alloc(
-            Zigalpm.pkgbuild.parser.Pkgbuild,
+            PackageManager.pkgbuild.parser.Pkgbuild,
             requested_names.items.len,
         );
 
@@ -1153,7 +1278,7 @@ const Real = struct {
 
         for (requested_names.items, package_builds) |name, *pkgbuild| {
             const parse_name = if (containsString(names.items, name)) name else names.items[0];
-            pkgbuild.* = try (Zigalpm.pkgbuild.Parser{
+            pkgbuild.* = try (PackageManager.pkgbuild.Parser{
                 .allocator = context.allocator,
                 .diagnostic = context.preparation_diagnostic,
                 .pkgbuild_path = pkgbuild_path,
@@ -1174,7 +1299,7 @@ const Real = struct {
         else
             null;
 
-        var review = Zigalpm.builder.pkgbuild_review.prepareWithDiagnostic(
+        var review = PackageManager.builder.pkgbuild_review.prepareWithDiagnostic(
             context.allocator,
             context.io,
             build_directory,
@@ -1193,7 +1318,7 @@ const Real = struct {
             break :blk path;
         } else shellybuild.destinations.packages orelse build_directory;
         const work_directory = if (shellybuild.destinations.build) |build_root|
-            try Zigalpm.builder.uniqueWorkDirectory(
+            try PackageManager.builder.uniqueWorkDirectory(
                 context.allocator,
                 context.io,
                 build_root,
@@ -1248,7 +1373,8 @@ const Real = struct {
         defer builder.deinit();
         var final_review = try builder.prepareFinalReviewWithOperation(&operation);
         defer final_review.deinit();
-        const package_base = try packageBaseFromBuilds(builder.package_builds);
+        const package_base = try context.allocator.dupe(u8, try packageBaseFromBuilds(builder.package_builds));
+        defer context.allocator.free(package_base);
         try self.setPendingResult(context.allocator, package_base, null, false);
         const expected_digest = if (supplied_digest) |digest| digest: {
             if (!std.mem.eql(u8, &digest, &final_review.digest))
@@ -1291,7 +1417,7 @@ const Real = struct {
         self.result.?.review_digest = expected_digest;
         if (!optionEnabled(invocation, "--skip-source-pgp-verification")) {
             if (coordinator_child and optionEnabled(invocation, "--isolated-source-keys"))
-                try source_pgp_transport.importKeys(context.allocator, context.io, context.environ, isolated_build.guest_source_keys);
+                try source_pgp_transport.importKeys(context.allocator, context.io, context.environ, isolated_build.guest_source_keys, &operation);
             try ensureSourcePgpKeys(context, &operation, package_base, builder.package_builds);
         }
         builder.options.reviewed_pkgbuild_digest = expected_digest;
@@ -1308,7 +1434,7 @@ const Real = struct {
             );
             return err;
         };
-        defer Zigalpm.builder.deinitArtifacts(context.allocator, artifacts);
+        defer PackageManager.builder.deinitArtifacts(context.allocator, artifacts);
         try self.ownResult(
             context.allocator,
             package_base,
@@ -1363,9 +1489,9 @@ const SourcePgpCommandContext = struct {
 
 fn ensureSourcePgpKeys(
     context: *runtime.RuntimeContext,
-    operation: *const Zigalpm.Operation,
+    operation: *const PackageManager.Operation,
     package_name: []const u8,
-    package_builds: []const Zigalpm.pkgbuild.parser.Pkgbuild,
+    package_builds: []const PackageManager.pkgbuild.parser.Pkgbuild,
 ) !void {
     var fingerprints: std.ArrayList([]const u8) = .empty;
     defer fingerprints.deinit(context.allocator);
@@ -1379,7 +1505,7 @@ fn ensureSourcePgpKeys(
 
 fn ensureSourcePgpFingerprints(
     context: *runtime.RuntimeContext,
-    operation: *const Zigalpm.Operation,
+    operation: *const PackageManager.Operation,
     package_name: []const u8,
     fingerprints: []const []const u8,
 ) !void {
@@ -1391,7 +1517,7 @@ fn ensureSourcePgpFingerprints(
         .runtime_context = context,
         .executable = std.mem.trimEnd(u8, executable_allocated, " (deleted)"),
     };
-    try Zigalpm.source_pgp_keyring.ensurePinnedKeys(
+    try PackageManager.source_pgp_keyring.ensurePinnedKeys(
         context.allocator,
         operation,
         package_name,
@@ -1427,7 +1553,7 @@ const BuildRequest = struct {
     /// Borrows `pkgbuild_path`; valid until the request is deinitialized.
     build_directory: []const u8,
     shellybuild: *ShellyBuildConfiguration,
-    package_builds: []Zigalpm.pkgbuild.parser.Pkgbuild,
+    package_builds: []PackageManager.pkgbuild.parser.Pkgbuild,
     parsed_count: usize,
     no_check: bool,
     /// Host-side output selected after configuration is loaded. The command
@@ -1446,7 +1572,7 @@ const BuildRequest = struct {
 };
 
 fn packageBaseFromBuilds(
-    package_builds: []const Zigalpm.pkgbuild.parser.Pkgbuild,
+    package_builds: []const PackageManager.pkgbuild.parser.Pkgbuild,
 ) ![]const u8 {
     if (package_builds.len == 0) return error.MissingPackageName;
     return package_builds[0].variables.get("pkgbase") orelse
@@ -1472,11 +1598,7 @@ fn parseBuildRequest(
         return error.InvalidPkgbuildPath;
     };
 
-    const shellybuild = try ShellyBuildConfiguration.init(
-        context.io,
-        context.allocator,
-        context.environ,
-    );
+    const shellybuild = try loadBuildConfiguration(context, invocation);
     errdefer shellybuild.deinit();
 
     const package_destination = if (optionValue(invocation, "--package-destination")) |path| blk: {
@@ -1491,7 +1613,7 @@ fn parseBuildRequest(
         .limited(32 * 1024 * 1024),
     );
     defer context.allocator.free(pkgbuild_content);
-    var names = try (Zigalpm.pkgbuild.Parser{
+    var names = try (PackageManager.pkgbuild.Parser{
         .allocator = context.allocator,
         .diagnostic = context.preparation_diagnostic,
         .pkgbuild_path = pkgbuild_path,
@@ -1512,7 +1634,7 @@ fn parseBuildRequest(
         try requested_names.appendSlice(context.allocator, names.items);
 
     const package_builds = try context.allocator.alloc(
-        Zigalpm.pkgbuild.parser.Pkgbuild,
+        PackageManager.pkgbuild.parser.Pkgbuild,
         requested_names.items.len,
     );
     errdefer context.allocator.free(package_builds);
@@ -1521,7 +1643,7 @@ fn parseBuildRequest(
         pkgbuild.deinit(context.allocator);
     for (requested_names.items, package_builds) |name, *pkgbuild| {
         const parse_name = if (containsString(names.items, name)) name else names.items[0];
-        pkgbuild.* = try (Zigalpm.pkgbuild.Parser{
+        pkgbuild.* = try (PackageManager.pkgbuild.Parser{
             .allocator = context.allocator,
             .diagnostic = context.preparation_diagnostic,
             .pkgbuild_path = pkgbuild_path,
@@ -1556,7 +1678,7 @@ fn parseBuildRequest(
 fn runIsolatedCoordinator(
     runner: *Real,
     context: *runtime.RuntimeContext,
-    operation_context: *Zigalpm.OperationContext,
+    operation_context: *PackageManager.OperationContext,
     invocation: *const parser.Invocation,
 ) !BuildCommandResult {
     if (!elevation.isRoot()) return error.ElevationRequired;
@@ -1585,7 +1707,7 @@ fn runIsolatedCoordinator(
         .kind = .build,
         .subject = request.pkgbuild_path,
     });
-    var completion: Zigalpm.OperationCompletionStatus = .failed;
+    var completion: PackageManager.OperationCompletionStatus = .failed;
     defer operation.finish(completion);
 
     var review = try captureCoordinatorReview(
@@ -1604,7 +1726,7 @@ fn runIsolatedCoordinator(
         .limited(32 * 1024 * 1024),
     );
     defer context.allocator.free(pkgbuild_content);
-    const current_digest = Zigalpm.builder.pkgbuild_review.digestPreparedReview(
+    const current_digest = PackageManager.builder.pkgbuild_review.digestPreparedReview(
         pkgbuild_content,
         review.reviewed_files,
     );
@@ -1639,15 +1761,24 @@ fn runIsolatedCoordinator(
         }
     }
 
-    var bootstrap_packages: std.ArrayList([]const u8) = .empty;
-    defer bootstrap_packages.deinit(context.allocator);
-    if (optionEnabled(invocation, "--sync-deps")) {
-        if (review.aur_dependencies.len != 0) {
-            for (review.aur_dependencies) |name|
-                operation.status(.warning, name, "build.isolation.aur-dependency", null);
-            return error.IsolatedAurDependencyUnsupported;
-        }
-        try bootstrap_packages.appendSlice(context.allocator, review.repository_dependencies);
+    const environment_value = review.parsed.value.object.get("dependencyPlan") orelse return error.InvalidReviewResult;
+    const environment_json = try std.json.Stringify.valueAlloc(context.allocator, environment_value, .{});
+    defer context.allocator.free(environment_json);
+    var environment = try std.json.parseFromSlice(build_plan.Plan, context.allocator, environment_json, .{});
+    defer environment.deinit();
+    try validateBuildDependencyPlan(context, &operation, environment.value, review.package_base, request.pkgbuild_path);
+    runner.result.?.dependency_plan_digest = try parseReviewDigest(environment.value.planDigest);
+    const actual_policy = try buildPolicyDigest(context.allocator, request.shellybuild);
+    defer context.allocator.free(actual_policy);
+    if (!std.mem.eql(u8, actual_policy, environment.value.buildPolicyDigest) or environment.value.check == request.no_check)
+        return error.DependencyPlanMismatch;
+    if (optionValue(invocation, "--dependency-plan")) |path| {
+        const accepted_json = try std.Io.Dir.cwd().readFileAlloc(context.io, path, context.allocator, .limited(64 * 1024 * 1024));
+        defer context.allocator.free(accepted_json);
+        var accepted = try std.json.parseFromSlice(build_plan.Plan, context.allocator, accepted_json, .{});
+        defer accepted.deinit();
+        try validateBuildDependencyPlan(context, &operation, accepted.value, review.package_base, request.pkgbuild_path);
+        if (!std.mem.eql(u8, accepted.value.planDigest, environment.value.planDigest)) return error.DependencyPlanMismatch;
     }
 
     const source_keys = if (optionEnabled(invocation, "--skip-source-pgp-verification"))
@@ -1662,10 +1793,11 @@ fn runIsolatedCoordinator(
     defer context.allocator.free(executable_allocated);
     const executable = std.mem.trimEnd(u8, executable_allocated, " (deleted)");
     operation.status(.information, "Provisioning clean build root", "build.isolation.provision", null);
-    try root.bootstrap(context.environ, executable, bootstrap_packages.items, &operation);
+    try root.bootstrapPlanned(context.environ, executable, context.config_path, environment_json, &operation);
     try root.stageReviewedInputs(context.environ, pkgbuild_content, review.reviewed_files, &operation);
 
     try root.stageExecutable(executable);
+    try root.validateRuntime(context.environ, &operation);
     if (source_keys.len != 0) try root.stageSourcePgpKeys(source_keys);
 
     const guest_configuration = try renderIsolatedConfiguration(
@@ -1690,6 +1822,18 @@ fn runIsolatedCoordinator(
     const expected_names = review.package_names;
     const validated_artifacts = try validateIsolatedArtifacts(context, root.artifact_path, expected_names);
     defer isolated_build.deinitValidatedArtifacts(context.allocator, validated_artifacts);
+
+    const version_change = try root.readPkgverChange(pkgbuild_content);
+    defer if (version_change) |version| context.allocator.free(version);
+    if (version_change) |version| {
+        var original_hash: PackageManager.builder.pkgbuild_review.Digest = undefined;
+        std.crypto.hash.sha2.Sha256.hash(pkgbuild_content, &original_hash, .{});
+        const original_hex = std.fmt.bytesToHex(original_hash, .lower);
+        const arguments = try isolatedPkgverArguments(context.allocator, invocation, request.pkgbuild_path, version, &original_hex, &digest_hex);
+        defer context.allocator.free(arguments);
+        const exit_code = (try elevation.runAsInvokingUser(context, arguments)) orelse return error.InvokingUserUnavailable;
+        if (exit_code != 0) return error.PkgverWritebackFailed;
+    }
 
     const destination = request.package_destination;
     const exported_artifacts = try root.exportArtifacts(
@@ -1725,6 +1869,7 @@ fn runIsolatedCoordinator(
     return .{
         .package_base = try context.allocator.dupe(u8, review.package_base),
         .review_digest = review.digest,
+        .dependency_plan_digest = try parseReviewDigest(environment.value.planDigest),
         .isolated = true,
         .artifacts = command_artifacts,
     };
@@ -1735,12 +1880,10 @@ fn validateIsolatedArtifacts(
     artifact_directory: []const u8,
     expected_names: []const []const u8,
 ) ![]isolated_build.ValidatedArtifact {
-    const bindings = Zigalpm.alpm.bindings.libalpm;
-    const raw = bindings.alpm;
-    var alpm_error: raw.alpm_errno_t = 0;
-    const handle = raw.alpm_initialize("/", "/var/lib/pacman", &alpm_error) orelse
-        return error.ArtifactValidationFailed;
-    defer _ = raw.alpm_release(handle);
+    const manager = try PackageManager.Manager.init(context.allocator, context.environ, .{
+        .config_path = context.config_path,
+    });
+    defer manager.deinit();
 
     const found = try context.allocator.alloc(bool, expected_names.len);
     defer context.allocator.free(found);
@@ -1757,12 +1900,9 @@ fn validateIsolatedArtifacts(
         if (entry.kind != .file or !isolated_build.isPackageArtifact(entry.name)) continue;
         const path = try std.fs.path.joinZ(context.allocator, &.{ artifact_directory, entry.name });
         defer context.allocator.free(path);
-        var package: ?*raw.alpm_pkg_t = null;
-        if (raw.alpm_pkg_load(handle, path.ptr, 1, 0, &package) != 0 or package == null)
-            return error.ArtifactValidationFailed;
-        defer _ = raw.alpm_pkg_free(package.?);
-        const package_name = bindings.str(raw.alpm_pkg_get_name(package.?)) orelse
-            return error.ArtifactValidationFailed;
+        var package = manager.load_archive(path) catch return error.ArtifactValidationFailed;
+        defer package.deinit(context.allocator);
+        const package_name = package.name_value;
         var matched = false;
         for (expected_names, found) |expected, *was_found| {
             if (!std.mem.eql(u8, package_name, expected)) continue;
@@ -1813,6 +1953,21 @@ fn buildIsolatedChildArguments(
             std.mem.startsWith(u8, argument, "--json=") or
             std.mem.eql(u8, argument, "-j") or
             std.mem.eql(u8, argument, "--")) continue;
+        // The selected repository configuration belongs to the host review and
+        // bootstrap. Its path is not staged inside the guest; dispatch would
+        // fail while resolving it, before the unprivileged build can start.
+        if (std.mem.eql(u8, argument, "--config")) {
+            if (index + 1 >= arguments.len) return error.InvalidConfig;
+            index += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, argument, "--config=")) continue;
+        if (std.mem.eql(u8, argument, "--dependency-plan")) {
+            if (index + 1 >= arguments.len) return error.InvalidDependencyPlanOptions;
+            index += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, argument, "--dependency-plan=")) continue;
         if (std.mem.eql(u8, argument, "--package-destination")) {
             if (index + 1 >= arguments.len) return error.MissingPackageDestination;
             index += 1;
@@ -1859,6 +2014,9 @@ fn renderIsolatedConfiguration(
     try writer.writeAll("[package]\n");
     try writeTomlString(writer, "packager", configuration.package.packager);
     try writeTomlString(writer, "extension", configuration.package.extension);
+    if (configuration.package.carch) |carch| try writeTomlString(writer, "carch", carch);
+    if (configuration.package.compression_level) |preset|
+        try writer.print("compression_level = {d}\n", .{@intFromEnum(preset)});
     try writeTomlArray(writer, "options", configuration.package.options);
     try writeTomlArray(writer, "strip_binaries", configuration.package.strip_binaries);
     try writeTomlArray(writer, "strip_shared", configuration.package.strip_shared);
@@ -1913,7 +2071,7 @@ fn writeTomlQuoted(writer: *std.Io.Writer, value: []const u8) !void {
 fn runHostBuildCoordinator(
     runner: *Real,
     context: *runtime.RuntimeContext,
-    operation_context: *Zigalpm.OperationContext,
+    operation_context: *PackageManager.OperationContext,
     invocation: *const parser.Invocation,
 ) !void {
     var request = try parseBuildRequest(context, invocation);
@@ -1937,7 +2095,7 @@ fn runHostBuildCoordinator(
     if (install_requested) report = try ArtifactReportChannel.create(context);
     defer if (report) |*channel| channel.deinit(context);
 
-    var manager: ?*Zigalpm.AlpmManager = null;
+    var manager: ?*PackageManager.Manager = null;
     var dependency_cleanup: ?BuildDependencyCleanup = null;
     defer {
         if (dependency_cleanup) |*cleanup| {
@@ -1973,10 +2131,10 @@ fn runHostBuildCoordinator(
             );
         }
 
-        manager = try Zigalpm.AlpmManager.init(
+        manager = try PackageManager.Manager.init(
             context.allocator,
             context.environ,
-            .{ .use_root = true, .operation_context = operation_context },
+            .{ .config_path = context.config_path, .use_root = true, .operation_context = operation_context },
         );
         const alpm = manager.?;
         try alpm.sync(false);
@@ -2010,7 +2168,8 @@ fn runHostBuildCoordinator(
             defer context.allocator.free(executable);
             const build_command = std.mem.trimEnd(u8, executable, " (deleted)");
             const aur_base = try aur_url.resolveFor(context, invocation);
-            const aur_manager = try Zigalpm.AurManager.init(context.allocator, context.environ, .{
+            const aur_manager = try PackageManager.AurManager.init(context.allocator, context.environ, .{
+                .config_path = context.config_path,
                 .aur_git_base_url = aur_base,
                 .root = true,
                 .check = checkOverride(invocation),
@@ -2123,9 +2282,9 @@ fn signOverride(invocation: *const parser.Invocation) ?bool {
 }
 
 const AlpmResolverContext = struct {
-    manager: *Zigalpm.AlpmManager,
+    manager: *PackageManager.Manager,
 
-    fn backend(self: *AlpmResolverContext) Zigalpm.aur.dependency_resolver.Backend {
+    fn backend(self: *AlpmResolverContext) PackageManager.aur.dependency_resolver.Backend {
         return .{
             .context = self,
             .is_installed = alpmDependencyInstalled,
@@ -2139,12 +2298,13 @@ const AlpmResolverContext = struct {
 /// refresh private: updating the host sync database here would affect later
 /// host transactions, and using its local database would hide guest needs.
 const ReviewRepositories = struct {
-    manager: *Zigalpm.AlpmManager,
+    manager: *PackageManager.Manager,
     database_path: ?[]u8,
+    configuration_digest: [64]u8,
 
     fn init(
         context: *runtime.RuntimeContext,
-        operation_context: ?*Zigalpm.OperationContext,
+        operation_context: ?*PackageManager.OperationContext,
         host_dependencies: bool,
         config_path: ?[]const u8,
     ) !ReviewRepositories {
@@ -2167,18 +2327,21 @@ const ReviewRepositories = struct {
         else
             null;
         defer if (log_path) |path| context.allocator.free(path);
-        const manager = try Zigalpm.AlpmManager.init(context.allocator, context.environ, .{
-            .config_path = config_path,
+        var configuration_digest: [64]u8 = undefined;
+        const manager = try PackageManager.Manager.init(context.allocator, context.environ, .{
+            .config_path = config_path orelse context.config_path,
+            .configuration_digest = &configuration_digest,
             .use_root = false,
             .operation_context = operation_context,
             .database_path = database_path,
+            .cache_directory = database_path,
             .log_file = log_path,
         });
         errdefer manager.deinit();
         // Like an unprivileged upgrade preview, defer signature enforcement
         // to the provisioning transaction, which uses the host trust policy.
         if (database_path != null) try manager.sync_for_update_check(false);
-        return .{ .manager = manager, .database_path = database_path };
+        return .{ .manager = manager, .database_path = database_path, .configuration_digest = configuration_digest };
     }
 
     fn deinit(self: *ReviewRepositories, context: *runtime.RuntimeContext) void {
@@ -2195,9 +2358,9 @@ const ReviewRepositories = struct {
 /// freshly synchronized, but the host local database must not suppress a
 /// dependency that still needs to be provisioned into the guest.
 const IsolatedResolverContext = struct {
-    manager: *Zigalpm.AlpmManager,
+    manager: *PackageManager.Manager,
 
-    fn backend(self: *IsolatedResolverContext) Zigalpm.aur.dependency_resolver.Backend {
+    fn backend(self: *IsolatedResolverContext) PackageManager.aur.dependency_resolver.Backend {
         return .{
             .context = self,
             .is_installed = isolatedDependencyInstalled,
@@ -2206,27 +2369,33 @@ const IsolatedResolverContext = struct {
     }
 };
 
-fn isolatedDependencyInstalled(_: ?*anyopaque, _: [:0]const u8) bool {
+fn isolatedDependencyInstalled(_: ?*anyopaque, _: [:0]const u8) anyerror!bool {
     return false;
 }
 
-fn isolatedRepoSatisfier(context: ?*anyopaque, dependency: [:0]const u8) ?[]const u8 {
+fn isolatedRepoSatisfier(context: ?*anyopaque, dependency: [:0]const u8) anyerror!?[]const u8 {
     const self: *IsolatedResolverContext = @ptrCast(@alignCast(context.?));
-    return self.manager.find_remote_satisfier_for_dependency(dependency) catch null;
+    return self.manager.find_remote_satisfier_for_dependency(dependency) catch |err| switch (err) {
+        error.PkgNotFound => return null,
+        else => return err,
+    };
 }
 
-fn alpmDependencyInstalled(context: ?*anyopaque, dependency: [:0]const u8) bool {
+fn alpmDependencyInstalled(context: ?*anyopaque, dependency: [:0]const u8) anyerror!bool {
     const self: *AlpmResolverContext = @ptrCast(@alignCast(context.?));
-    return self.manager.is_dependency_satisfied_by_installed_packages(dependency) catch false;
+    return self.manager.is_dependency_satisfied_by_installed_packages(dependency);
 }
 
-fn alpmRepoSatisfier(context: ?*anyopaque, dependency: [:0]const u8) ?[]const u8 {
+fn alpmRepoSatisfier(context: ?*anyopaque, dependency: [:0]const u8) anyerror!?[]const u8 {
     const self: *AlpmResolverContext = @ptrCast(@alignCast(context.?));
-    return self.manager.find_remote_satisfier_for_dependency(dependency) catch null;
+    return self.manager.find_remote_satisfier_for_dependency(dependency) catch |err| switch (err) {
+        error.PkgNotFound => return null,
+        else => return err,
+    };
 }
 
 const SyncDependencyPlan = struct {
-    repo_dependencies: []Zigalpm.aur.dependency_resolver.RepoDependency,
+    repo_dependencies: []PackageManager.aur.dependency_resolver.RepoDependency,
     aur_dependencies: [][]u8,
 
     fn deinit(self: *SyncDependencyPlan, allocator: std.mem.Allocator) void {
@@ -2244,7 +2413,7 @@ fn dependencyPlanFromReview(
     aur_dependencies: []const []const u8,
 ) !SyncDependencyPlan {
     const repo = try allocator.alloc(
-        Zigalpm.aur.dependency_resolver.RepoDependency,
+        PackageManager.aur.dependency_resolver.RepoDependency,
         repository_dependencies.len,
     );
     var repo_count: usize = 0;
@@ -2281,11 +2450,11 @@ fn dependencyPlanFromReview(
 /// them. Merge shared inputs while retaining their strongest role.
 fn resolveSyncDependencies(
     allocator: std.mem.Allocator,
-    package_builds: []const Zigalpm.pkgbuild.parser.Pkgbuild,
+    package_builds: []const PackageManager.pkgbuild.parser.Pkgbuild,
     no_check: bool,
-    backend: Zigalpm.aur.dependency_resolver.Backend,
+    backend: PackageManager.aur.dependency_resolver.Backend,
 ) !SyncDependencyPlan {
-    const resolver = Zigalpm.aur.dependency_resolver;
+    const resolver = PackageManager.aur.dependency_resolver;
     var repo: std.ArrayList(resolver.RepoDependency) = .empty;
     errdefer {
         for (repo.items) |dependency| allocator.free(dependency.name);
@@ -2323,7 +2492,7 @@ fn resolveSyncDependencies(
 }
 
 fn findRepoDependency(
-    dependencies: []const Zigalpm.aur.dependency_resolver.RepoDependency,
+    dependencies: []const PackageManager.aur.dependency_resolver.RepoDependency,
     name: []const u8,
 ) ?usize {
     for (dependencies, 0..) |dependency, index|
@@ -2335,12 +2504,12 @@ const BuildDependencyCleanup = struct {
     allocator: std.mem.Allocator,
     baseline: std.StringHashMap(void),
 
-    fn init(allocator: std.mem.Allocator, manager: *Zigalpm.AlpmManager) !BuildDependencyCleanup {
+    fn init(allocator: std.mem.Allocator, manager: *PackageManager.Manager) !BuildDependencyCleanup {
         var baseline = std.StringHashMap(void).init(allocator);
         errdefer deinitOwnedStringSet(allocator, &baseline);
 
         const installed = try manager.get_installed_packages();
-        defer Zigalpm.alpm.OwnedPackage.deinitSlice(allocator, installed);
+        defer PackageManager.Manager.OwnedPackage.deinitSlice(allocator, installed);
         for (installed) |package| {
             const name = package.name() orelse continue;
             if (baseline.contains(name)) continue;
@@ -2364,16 +2533,16 @@ const BuildDependencyCleanup = struct {
     /// recoverable cleanup failure and never replace the build result.
     fn run(
         self: *const BuildDependencyCleanup,
-        manager: *Zigalpm.AlpmManager,
+        manager: *PackageManager.Manager,
         context: *runtime.RuntimeContext,
-        parent_context: *Zigalpm.OperationContext,
+        parent_context: *PackageManager.OperationContext,
     ) void {
         var operation = parent_context.begin(.{
             .backend = .alpm,
             .kind = .cleanup,
             .subject = "build dependencies",
         });
-        var completion: Zigalpm.OperationCompletionStatus = .success;
+        var completion: PackageManager.OperationCompletionStatus = .success;
         defer operation.finish(completion);
 
         var cleanup_context = independentCleanupContext(context.allocator, context.io);
@@ -2404,7 +2573,7 @@ const BuildDependencyCleanup = struct {
             );
             return;
         };
-        defer Zigalpm.alpm.OwnedPackage.deinitSlice(context.allocator, installed);
+        defer PackageManager.Manager.OwnedPackage.deinitSlice(context.allocator, installed);
 
         var targets: std.ArrayList([:0]const u8) = .empty;
         defer {
@@ -2491,13 +2660,13 @@ fn appendCleanupCandidate(
     };
 }
 
-fn independentCleanupContext(allocator: std.mem.Allocator, io: std.Io) Zigalpm.OperationContext {
-    return Zigalpm.OperationContext.init(allocator, io);
+fn independentCleanupContext(allocator: std.mem.Allocator, io: std.Io) PackageManager.OperationContext {
+    return PackageManager.OperationContext.init(allocator, io);
 }
 
 fn reportCleanupFailure(
     allocator: std.mem.Allocator,
-    operation: *const Zigalpm.Operation,
+    operation: *const PackageManager.Operation,
     err: anyerror,
     targets: []const [:0]const u8,
 ) void {
@@ -2508,7 +2677,7 @@ fn reportCleanupFailure(
         std.fmt.allocPrint(
             allocator,
             "Could not remove build dependencies: {0f}. {1s} Review the remaining dependencies before removing them manually.\n\nTechnical details: {2s}",
-            .{ @import("diagnostics").safe(value), @import("diagnostics").cause(err), @errorName(err) },
+            .{ diagnostics.safe(value), diagnostics.cause(err), @errorName(err) },
         ) catch null
     else
         null;
@@ -2529,14 +2698,15 @@ fn runDeferredCleanupOperation(
     invocation: *const parser.Invocation,
     cleanup: *const BuildDependencyCleanup,
 ) !void {
-    var operation_context = Zigalpm.OperationContext.init(context.allocator, context.io);
+    var operation_context = PackageManager.OperationContext.init(context.allocator, context.io);
     defer operation_context.deinit();
     context.attachTransactionLog(&operation_context);
     var renderer = try standard_single_pane.Renderer.init(context, invocation.globals.no_confirm);
     defer renderer.deinit();
     try renderer.attach(&operation_context);
     try renderer.begin("Cleaning up build dependencies...");
-    var manager = try Zigalpm.AlpmManager.init(context.allocator, context.environ, .{
+    var manager = try PackageManager.Manager.init(context.allocator, context.environ, .{
+        .config_path = context.config_path,
         .use_root = true,
         .operation_context = &operation_context,
     });
@@ -2622,6 +2792,49 @@ fn optionValue(invocation: *const parser.Invocation, name: []const u8) ?[]const 
     return null;
 }
 
+fn compressionOverride(invocation: *const parser.Invocation) !?compression_policy.Preset {
+    const value = optionValue(invocation, "--compression-level") orelse return null;
+    return try compression_policy.Preset.parse(value);
+}
+
+fn applyCompressionOverride(configuration: *ShellyBuildConfiguration, invocation: *const parser.Invocation) !void {
+    if (try compressionOverride(invocation)) |preset|
+        configuration.package.compression_level = preset;
+    try PackageManager.shared.archive.validateCompression(configuration.package.extension, configuration.package.compression_level);
+}
+
+fn loadBuildConfiguration(context: *runtime.RuntimeContext, invocation: *const parser.Invocation) !*ShellyBuildConfiguration {
+    const configuration = try ShellyBuildConfiguration.init(context.io, context.allocator, context.environ);
+    errdefer configuration.deinit();
+    try applyCompressionOverride(configuration, invocation);
+    return configuration;
+}
+
+fn writeDependencyResolutionError(writer: *std.Io.Writer, err: anyerror) !void {
+    var json: std.json.Stringify = .{ .writer = writer };
+    try json.write(.{
+        .schemaVersion = @as(u32, 1),
+        .capability = "build.resolve-dependencies",
+        .isolated = true,
+        .complete = false,
+        .@"error" = .{ .code = @errorName(err), .message = buildErrorMessage(err) },
+    });
+}
+
+fn reportConfigurationError(context: *runtime.RuntimeContext, invocation: *const parser.Invocation, err: anyerror) !u8 {
+    try context.stderr.print("{s}\n", .{buildErrorMessage(err)});
+    try context.stderr.flush();
+    if (invocation.globals.json) {
+        if (optionEnabled(invocation, "--resolve-dependencies"))
+            try writeDependencyResolutionError(context.stdout, err)
+        else
+            try writeBuildJson(context.stdout, null, err, isolatedRequested(invocation));
+        try context.stdout.writeByte('\n');
+        try context.stdout.flush();
+    }
+    return exitCodeForBuildError(err);
+}
+
 fn hasPackageSelection(invocation: *const parser.Invocation) bool {
     for (invocation.options) |option|
         if (std.mem.eql(u8, option.name, "--package")) return true;
@@ -2667,24 +2880,98 @@ fn exitCodeForBuildError(err: anyerror) u8 {
         error.ReviewOnlyRequiresJson,
         error.InvalidPkgbuildPath,
         error.MissingPackageName,
+        error.InvalidDependencyPlanOptions,
+        error.UnsupportedDependencyPlan,
+        error.InvalidCompressionLevel,
+        error.UnsupportedCompressionPresetFormat,
         => 2,
         else => 1,
     };
 }
 
+/// Keep the plan's diagnostics alive after the review/plan arenas are released.
+/// The failure event reaches both the renderer and transaction log; the owned
+/// preparation diagnostic also survives into the coordinator's JSON response.
+fn validateBuildDependencyPlan(
+    context: *runtime.RuntimeContext,
+    operation: *const PackageManager.Operation,
+    plan: build_plan.Plan,
+    package_name: []const u8,
+    pkgbuild_path: []const u8,
+) !void {
+    plan.validate(context.allocator) catch |err| {
+        if (err != error.IncompleteDependencyPlan and err != error.MissingArtifactHash) return err;
+        var message: std.Io.Writer.Allocating = .init(context.allocator);
+        defer message.deinit();
+        try message.writer.writeAll(buildErrorMessage(err));
+        for (plan.unresolved) |issue| {
+            const reason = if (std.mem.eql(u8, issue.code, "not_in_repositories"))
+                "not found in configured repositories"
+            else if (std.mem.eql(u8, issue.code, "unsatisfied_dependency"))
+                "no package satisfies the dependency"
+            else if (std.mem.eql(u8, issue.code, "not_in_environment"))
+                "missing from the resolved build environment"
+            else if (std.mem.eql(u8, issue.code, "missing_artifact_sha256"))
+                "repository metadata has no valid SHA-256 archive hash"
+            else
+                "dependency resolution failed";
+            try message.writer.print("\n- {f} (required by {f}): {s} [{f}]", .{
+                diagnostics.safe(issue.requirement), diagnostics.safe(issue.requiredBy), reason, diagnostics.safe(issue.code),
+            });
+        }
+        for (plan.choices) |choice| {
+            try message.writer.print("\n- {f}: a provider must be selected; candidates:", .{diagnostics.safe(choice.requirement)});
+            for (choice.candidates) |candidate| try message.writer.print(" {f}", .{diagnostics.safe(candidate)});
+        }
+        // An externally supplied plan can claim completeness despite bad hashes.
+        // Report every invalid hash, including those not listed in unresolved.
+        for (plan.packages) |package| {
+            if (PackageManager.Manager.build_transaction.validHash(package.sha256 orelse "")) continue;
+            var already_reported = false;
+            for (plan.unresolved) |issue| {
+                if (std.mem.eql(u8, issue.code, "missing_artifact_sha256") and std.mem.eql(u8, issue.requirement, package.name)) {
+                    already_reported = true;
+                    break;
+                }
+            }
+            if (!already_reported) try message.writer.print("\n- {f} (repository {f}): repository metadata has no valid SHA-256 archive hash [missing_artifact_sha256]", .{
+                diagnostics.safe(package.name), diagnostics.safe(package.repository),
+            });
+        }
+        if (plan.packages.len == 0) try message.writer.writeAll("\n- No packages were selected for the build environment.");
+        if (plan.architectures.len == 0) try message.writer.writeAll("\n- No target architecture was recorded in the dependency plan.");
+        if (!plan.isolated) try message.writer.writeAll("\n- The dependency plan does not describe an isolated build environment.");
+
+        if (context.preparation_diagnostic) |destination| {
+            var diagnostic = try PackageManager.pkgbuild.parser.Diagnostic.init(context.allocator, "", pkgbuild_path, package_name, "dependencies", null, err);
+            errdefer diagnostic.deinit();
+            diagnostic.message = try diagnostic.arena.allocator().dupe(u8, message.written());
+            if (destination.*) |*previous| previous.deinit();
+            destination.* = diagnostic;
+        }
+        operation.reportError(err, message.written(), "build.dependencies", null, false);
+        return err;
+    };
+}
+
 fn buildErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
+        error.DependencyPlanMismatch => "The dependency plan no longer matches the reviewed inputs, build policy, repositories, or selected packages. Resolve and review a new plan before building.",
+        error.IncompleteDependencyPlan => "The dependency plan is incomplete. Resolve the dependency or repository metadata issues listed below before building.",
+        error.UnsupportedDependencyPlan => "This dependency plan schema is unsupported. Resolve a new plan with this version of Shelly.",
+        error.InvalidDependencyPlanOptions => "Dependency resolution requires --isolated and --json, and cannot be combined with installation, review-only, or a supplied plan. A supplied plan requires an isolated build.",
+        error.MissingArtifactHash => "A selected package has no valid SHA-256 archive hash. Publish repository metadata containing artifact hashes before building.",
         error.ReviewedPkgbuildChanged => "The reviewed PKGBUILD inputs changed before the build started. Review the current PKGBUILD and source files again, then restart the build.",
         error.InvalidReviewDigest => "The review digest must be 64 hexadecimal characters.",
         error.MissingReviewDigest => "Could not start the build because the coordinator did not provide a review digest. Review the PKGBUILD again and restart the build.",
         error.PackageDestinationMustBeAbsolute => "The package destination must be an absolute path.",
         error.MissingPackageDestination => "The package destination option requires a directory.",
         error.Cancelled => "Operation cancelled.",
-        else => @import("diagnostics").cause(err),
+        else => diagnostics.cause(err),
     };
 }
 
-fn contextDiagnostic(context: *runtime.RuntimeContext) ?Zigalpm.pkgbuild.parser.Diagnostic {
+fn contextDiagnostic(context: *runtime.RuntimeContext) ?PackageManager.pkgbuild.parser.Diagnostic {
     return if (context.preparation_diagnostic) |value| value.* else null;
 }
 
@@ -2694,7 +2981,7 @@ fn contextLogPath(context: *runtime.RuntimeContext) ?[]const u8 {
 
 fn preparationErrorMessage(context: *runtime.RuntimeContext, err: anyerror) ![]u8 {
     const fallback = if (contextDiagnostic(context) == null)
-        try Zigalpm.user_errors.format(context.allocator, err, .{ .operation = switch (err) {
+        try PackageManager.user_errors.format(context.allocator, err, .{ .operation = switch (err) {
             error.IsolatedBuildFailed => "the isolated package build",
             error.IsolatedBootstrapFailed, error.IsolatedCommandFailed => "the isolated build root setup",
             else => "the PKGBUILD preparation",
@@ -2725,7 +3012,7 @@ fn writeBuildJsonWithDiagnostic(
     result: ?BuildCommandResult,
     failure: ?anyerror,
     isolated_hint: bool,
-    diagnostic: ?Zigalpm.pkgbuild.parser.Diagnostic,
+    diagnostic: ?PackageManager.pkgbuild.parser.Diagnostic,
     log_path: ?[]const u8,
 ) !void {
     var json: std.json.Stringify = .{ .writer = writer };
@@ -2739,6 +3026,13 @@ fn writeBuildJsonWithDiagnostic(
     try json.objectField("reviewDigest");
     if (result) |value| {
         if (value.review_digest) |digest| {
+            const encoded = std.fmt.bytesToHex(digest, .lower);
+            try json.write(&encoded);
+        } else try json.write(null);
+    } else try json.write(null);
+    try json.objectField("dependencyPlanDigest");
+    if (result) |value| {
+        if (value.dependency_plan_digest) |digest| {
             const encoded = std.fmt.bytesToHex(digest, .lower);
             try json.write(&encoded);
         } else try json.write(null);
@@ -2829,6 +3123,16 @@ fn writeReviewOnlyJson(writer: *std.Io.Writer, result: *ReviewOnlyResult) !void 
         try json.endObject();
     }
     try json.endArray();
+    if (result.environment_plan) |plan| {
+        try json.objectField("dependencyPlan");
+        try json.write(plan);
+        // Preserve private review transport fields while isolated coordinators
+        // consume only dependencyPlan. Host builds retain their existing path.
+        try json.objectField("repositoryDependencies");
+        try json.write(@as([]const []const u8, &.{}));
+        try json.objectField("aurDependencies");
+        try json.write(@as([]const []const u8, &.{}));
+    }
     if (result.dependency_plan) |plan| {
         try json.objectField("repositoryDependencies");
         try json.beginArray();
@@ -2854,8 +3158,14 @@ fn coordinatorReviewArguments(
     var arguments: std.ArrayList([]const u8) = .empty;
     defer arguments.deinit(allocator);
     try arguments.appendSlice(allocator, &.{ "build", "--review-only", "--review-dependencies", "--json", "--no-confirm" });
-    if (dependency_mode == .host)
+    if (dependency_mode == .host) {
         try arguments.append(allocator, "--review-host-dependencies");
+    } else {
+        try arguments.append(allocator, "--review-build-environment");
+    }
+    if (optionEnabled(invocation, "--no-check")) try arguments.append(allocator, "--no-check");
+    if (optionEnabled(invocation, "--check")) try arguments.append(allocator, "--check");
+    if (optionValue(invocation, "--compression-level")) |level| try arguments.appendSlice(allocator, &.{ "--compression-level", level });
     for (invocation.options) |option| {
         if (!std.mem.eql(u8, option.name, "--package")) continue;
         try arguments.append(allocator, "--package");
@@ -2867,7 +3177,7 @@ fn coordinatorReviewArguments(
 
 fn captureCoordinatorReview(
     context: *runtime.RuntimeContext,
-    operation_context: *Zigalpm.OperationContext,
+    operation_context: *PackageManager.OperationContext,
     invocation: *const parser.Invocation,
     pkgbuild_path: []const u8,
     dependency_mode: CoordinatorReviewDependencyMode,
@@ -2906,14 +3216,14 @@ fn captureCoordinatorReview(
 
     const findings_value = object.get("findings") orelse return error.InvalidReviewResult;
     if (findings_value != .array) return error.InvalidReviewResult;
-    const findings = try context.allocator.alloc(Zigalpm.OperationReviewFinding, findings_value.array.items.len);
+    const findings = try context.allocator.alloc(PackageManager.OperationReviewFinding, findings_value.array.items.len);
     errdefer context.allocator.free(findings);
     for (findings_value.array.items, findings) |value, *finding| {
         if (value != .object) return error.InvalidReviewResult;
         const severity_text = jsonString(value.object, "severity") orelse return error.InvalidReviewResult;
         finding.* = .{
             .tool = jsonString(value.object, "tool") orelse return error.InvalidReviewResult,
-            .severity = std.meta.stringToEnum(Zigalpm.OperationReviewSeverity, severity_text) orelse return error.InvalidReviewResult,
+            .severity = std.meta.stringToEnum(PackageManager.OperationReviewSeverity, severity_text) orelse return error.InvalidReviewResult,
             .hook = jsonString(value.object, "hook") orelse return error.InvalidReviewResult,
             .matched_line = jsonString(value.object, "matchedLine") orelse return error.InvalidReviewResult,
             .message = jsonString(value.object, "message") orelse return error.InvalidReviewResult,
@@ -2923,12 +3233,12 @@ fn captureCoordinatorReview(
     const files_value = object.get("relatedFiles") orelse return error.InvalidReviewResult;
     if (files_value != .array) return error.InvalidReviewResult;
     const reviewed_files = try context.allocator.alloc(
-        Zigalpm.builder.pkgbuild_review.ReviewedFile,
+        PackageManager.builder.pkgbuild_review.ReviewedFile,
         files_value.array.items.len,
     );
     errdefer context.allocator.free(reviewed_files);
     const attachments = try context.allocator.alloc(
-        Zigalpm.OperationQuestionAttachment,
+        PackageManager.OperationQuestionAttachment,
         files_value.array.items.len,
     );
     errdefer context.allocator.free(attachments);
@@ -3010,12 +3320,12 @@ test "build command routes review questions through standard and UI lifecycles" 
     const manifest = try spec.Manifest.load(test_context.arena.allocator());
 
     const ReviewRunner = struct {
-        response: ?Zigalpm.OperationQuestionResponse = null,
+        response: ?PackageManager.OperationQuestionResponse = null,
 
         pub fn run(
             self: *@This(),
             context: *runtime.RuntimeContext,
-            operation_context: *Zigalpm.OperationContext,
+            operation_context: *PackageManager.OperationContext,
             _: *const parser.Invocation,
         ) !void {
             var operation = operation_context.begin(.{
@@ -3050,7 +3360,7 @@ test "build command routes review questions through standard and UI lifecycles" 
         try executeWithRunner(&test_context.context, &standard.dispatch, &standard_runner),
     );
     try std.testing.expectEqual(
-        Zigalpm.OperationQuestionResponse.accepted,
+        PackageManager.OperationQuestionResponse.accepted,
         standard_runner.response.?,
     );
 
@@ -3066,7 +3376,7 @@ test "build command routes review questions through standard and UI lifecycles" 
         try executeWithRunner(&test_context.context, &ui.dispatch, &ui_runner),
     );
     try std.testing.expectEqual(
-        Zigalpm.OperationQuestionResponse.accepted,
+        PackageManager.OperationQuestionResponse.accepted,
         ui_runner.response.?,
     );
     try std.testing.expect(std.mem.indexOf(
@@ -3197,7 +3507,7 @@ test "package selection intent distinguishes implicit all from explicit members"
     try std.testing.expect(hasPackageSelection(&selected.dispatch));
 }
 
-test "makesrcinfo emits clean stdout and never runs lifecycle functions" {
+test "makesrcinfo updates pkgver with clean stdout and preserves existing sources" {
     const spec = @import("../cli/spec.zig");
     var test_context: test_support.TestContext = .{};
     test_context.init();
@@ -3217,7 +3527,10 @@ test "makesrcinfo emits clean stdout and never runs lifecycle functions" {
             "_enable_plasmoid=${{SYNCTHING_TRAY_ENABLE_PLASMOID:-1}}\n" ++
             "makedepends=('cmake')\n" ++
             "[[ $_enable_plasmoid ]] && makedepends+=('libplasma' 'extra-cmake-modules')\n" ++
-            "pkgver() {{ touch '{s}'; printf 2; }}\n" ++
+            "verify() {{ echo verify-output; printf verified > \"$SRCDEST/verified\"; }}\n" ++
+            "prepare() {{ echo prepare-output; touch prepared; }}\n" ++
+            "pkgver() {{ test -f prepared; printf 2; }}\n" ++
+            "check() {{ touch '{s}'; }}\n" ++
             "build() {{ touch '{s}'; }}\n" ++
             "package() {{ touch '{s}'; }}\n",
         .{ marker_path, marker_path, marker_path },
@@ -3227,21 +3540,25 @@ test "makesrcinfo emits clean stdout and never runs lifecycle functions" {
     pkgbuild.close(std.testing.io);
 
     try temporary.dir.createDirPath(std.testing.io, ".config/shelly");
+    const source_cache = try std.fs.path.join(test_context.arena.allocator(), &.{ directory_path, "source-cache" });
+    const configuration = try std.fmt.allocPrint(test_context.arena.allocator(), "[build.env]\nBUILD_ENV_DESCRIPTION = 'Dynamic description'\n[destinations]\nsources = '{s}'\n", .{source_cache});
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = ".config/shelly/shellybuild.conf",
-        .data = "[build.env]\nBUILD_ENV_DESCRIPTION = 'Dynamic description'\n",
+        .data = configuration,
     });
+    try temporary.dir.createDirPath(std.testing.io, "src");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "src/keep", .data = "existing build" });
     const environ = try testEnvironWithHome(std.testing.allocator, directory_path);
     defer environ.block.deinit(std.testing.allocator);
     test_context.context.environ = environ;
     const manifest = try spec.Manifest.load(test_context.arena.allocator());
-    var package_builds = try test_context.arena.allocator().alloc(Zigalpm.pkgbuild.parser.Pkgbuild, 1);
-    package_builds[0] = try (Zigalpm.pkgbuild.Parser{
+    var package_builds = try test_context.arena.allocator().alloc(PackageManager.pkgbuild.parser.Pkgbuild, 1);
+    package_builds[0] = try (PackageManager.pkgbuild.Parser{
         .allocator = test_context.arena.allocator(),
         .io = std.testing.io,
         .selected_package_name = "demo",
     }).parser_content(pkgbuild_content, directory_path);
-    var review = try Zigalpm.builder.preparePkgbuildReview(
+    var review = try PackageManager.builder.preparePkgbuildReview(
         test_context.arena.allocator(),
         std.testing.io,
         directory_path,
@@ -3269,7 +3586,7 @@ test "makesrcinfo emits clean stdout and never runs lifecycle functions" {
         try executeMakeSrcinfo(&test_context.context, &outcome.dispatch),
     );
     try std.testing.expectEqualStrings(
-        "pkgbase = demo\n\tpkgdesc = Dynamic description\n\tpkgver = 1\n\tpkgrel = 1\n" ++
+        "pkgbase = demo\n\tpkgdesc = Dynamic description\n\tpkgver = 2\n\tpkgrel = 1\n" ++
             "\tarch = any\n\tmakedepends = cmake\n\tmakedepends = libplasma\n" ++
             "\tmakedepends = extra-cmake-modules\n\npkgname = demo\n",
         test_context.stdout.writer.buffered(),
@@ -3283,6 +3600,55 @@ test "makesrcinfo emits clean stdout and never runs lifecycle functions" {
         error.FileNotFound,
         std.Io.Dir.cwd().access(std.testing.io, marker_path, .{}),
     );
+    try temporary.dir.access(std.testing.io, "source-cache/verified", .{});
+    const kept = try temporary.dir.readFileAlloc(std.testing.io, "src/keep", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("existing build", kept);
+    const updated = try temporary.dir.readFileAlloc(std.testing.io, "PKGBUILD", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(updated);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "pkgver='2'\n") != null);
+}
+
+test "makesrcinfo honors noverify and emits no stdout on preparation failure" {
+    const spec = @import("../cli/spec.zig");
+    for ([_]bool{ false, true }) |noverify| {
+        var test_context: test_support.TestContext = .{};
+        test_context.init();
+        defer test_context.deinit();
+        var temporary = std.testing.tmpDir(.{ .iterate = true });
+        defer temporary.cleanup();
+        const allocator = test_context.arena.allocator();
+        const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+        const path = try std.fs.path.join(allocator, &.{ directory, "PKGBUILD" });
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "PKGBUILD", .data =
+            \\pkgname=demo
+            \\pkgver=1
+            \\pkgrel=7
+            \\arch=('any')
+            \\verify() { echo verification-failed; exit 42; }
+            \\pkgver() { printf r42.gabcdef0; }
+            \\package() { exit 42; }
+        });
+        const environ = try testEnvironWithHome(std.testing.allocator, directory);
+        defer environ.block.deinit(std.testing.allocator);
+        test_context.context.environ = environ;
+        const manifest = try spec.Manifest.load(allocator);
+        var args: std.ArrayList([]const u8) = .empty;
+        try args.appendSlice(allocator, &.{ "build", "--makesrcinfo", "--reviewed", "--no-confirm", path });
+        if (noverify) try args.append(allocator, "--noverify");
+        const outcome = try parser.parse(allocator, &manifest, args.items);
+        const code = try executeMakeSrcinfo(&test_context.context, &outcome.dispatch);
+        if (noverify) {
+            try std.testing.expectEqual(@as(u8, 0), code);
+            try std.testing.expect(std.mem.indexOf(u8, test_context.stdout.writer.buffered(), "pkgver = r42.gabcdef0\n\tpkgrel = 1\n") != null);
+        } else {
+            try std.testing.expect(code != 0);
+            try std.testing.expectEqualStrings("", test_context.stdout.writer.buffered());
+        }
+        var entries = temporary.dir.iterate();
+        while (try entries.next(std.testing.io)) |entry|
+            try std.testing.expect(!std.mem.startsWith(u8, entry.name, "demo-"));
+    }
 }
 
 test "sync deps options parse under both spellings" {
@@ -3560,6 +3926,60 @@ test "isolated builds elevate only the outer coordinator" {
     try std.testing.expect(!shouldElevateBuildCoordinator(&child.dispatch, false));
 }
 
+test "isolated pkgver writeback validates host review without running lifecycle functions" {
+    const io = std.testing.io;
+    var context: test_support.TestContext = .{};
+    context.init();
+    defer context.deinit();
+    const allocator = context.arena.allocator();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    const environ = try testEnvironWithHome(allocator, directory);
+    defer environ.block.deinit(allocator);
+    context.context.environ = environ;
+    const path = try std.fs.path.join(allocator, &.{ directory, "Custom.PKGBUILD" });
+    const content =
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=7
+        \\arch=('any')
+        \\install=demo.install
+        \\pkgver() { touch lifecycle-ran; printf 99; }
+        \\package() { touch lifecycle-ran; }
+    ;
+    try temporary.dir.writeFile(io, .{ .sub_path = "Custom.PKGBUILD", .data = content });
+    try temporary.dir.writeFile(io, .{ .sub_path = "demo.install", .data = "post_install() { :; }\n" });
+    var operations = PackageManager.OperationContext.init(allocator, io);
+    defer operations.deinit();
+    const manifest = try @import("../cli/spec.zig").Manifest.load(allocator);
+    const outer = try parser.parse(allocator, &manifest, &.{ "build", "--isolated", "--install", "--package", "demo", path });
+    const review_request = try parser.parse(allocator, &manifest, &.{ "build", path });
+    var reviewed = try prepareReviewOnly(&context.context, &operations, &review_request.dispatch);
+    defer reviewed.deinit(allocator);
+    const original_hash = std.fmt.bytesToHex(reviewed.review.pkgbuild_digest, .lower);
+    const review_hash = std.fmt.bytesToHex(reviewed.review.digest, .lower);
+    const arguments = try isolatedPkgverArguments(allocator, &outer.dispatch, path, "r2.gabc", &original_hash, &review_hash);
+    const child = try parser.parse(allocator, &manifest, arguments);
+    try std.testing.expect(!isolatedRequested(&child.dispatch));
+    try std.testing.expect(!hostCoordinatorRequested(&child.dispatch));
+    try std.testing.expectEqualStrings("demo", optionValue(&child.dispatch, "--package").?);
+    try applyIsolatedPkgver(&context.context, &operations, &child.dispatch);
+    const expected = try PackageManager.builder.pkgver_update.render(allocator, content, "r2.gabc");
+    const updated = try temporary.dir.readFileAlloc(io, "Custom.PKGBUILD", allocator, .unlimited);
+    try std.testing.expectEqualStrings(expected, updated);
+    try std.testing.expectError(error.FileNotFound, temporary.dir.access(io, "lifecycle-ran", .{}));
+
+    try temporary.dir.writeFile(io, .{ .sub_path = "Custom.PKGBUILD", .data = content });
+    try temporary.dir.writeFile(io, .{ .sub_path = "demo.install", .data = "post_install() { echo changed; }\n" });
+    try std.testing.expectError(error.ReviewedPkgbuildChanged, applyIsolatedPkgver(&context.context, &operations, &child.dispatch));
+    const unchanged = try temporary.dir.readFileAlloc(io, "Custom.PKGBUILD", allocator, .unlimited);
+    try std.testing.expectEqualStrings(content, unchanged);
+    try temporary.dir.writeFile(io, .{ .sub_path = "Custom.PKGBUILD", .data = content ++ "\ntouch unreviewed-top-level-ran\n" });
+    try std.testing.expectError(error.ReviewedPkgbuildChanged, applyIsolatedPkgver(&context.context, &operations, &child.dispatch));
+    try std.testing.expectError(error.FileNotFound, temporary.dir.access(io, "unreviewed-top-level-ran", .{}));
+}
+
 test "isolated child arguments remove host coordinator flags and replace the path" {
     const arguments = [_][]const u8{
         "build",
@@ -3645,12 +4065,12 @@ test "isolated source key preparation checks the digest and refuses unapproved i
     context.context.environ = environ;
     try temporary.dir.createDir(io, ".gnupg", .fromMode(0o700));
     try temporary.dir.writeFile(io, .{ .sub_path = ".gnupg/gpg.conf", .data = "no-autostart\n" });
-    var operations = Zigalpm.OperationContext.init(allocator, io);
+    var operations = PackageManager.OperationContext.init(allocator, io);
     defer operations.deinit();
     const manifest = try @import("../cli/spec.zig").Manifest.load(context.arena.allocator());
     const wrong = try parser.parse(context.arena.allocator(), &manifest, &.{ "build", "--prepare-isolated-source-keys", "--no-confirm", "--review-digest", "5a" ** 32, path });
     try std.testing.expectError(error.ReviewedPkgbuildChanged, prepareSourcePgpKeyExport(&context.context, &wrong.dispatch, &operations));
-    const digest = Zigalpm.builder.pkgbuild_review.digestPreparedReview(content, @as([]const Zigalpm.builder.pkgbuild_review.ReviewedFile, &.{}));
+    const digest = PackageManager.builder.pkgbuild_review.digestPreparedReview(content, @as([]const PackageManager.builder.pkgbuild_review.ReviewedFile, &.{}));
     const hex = std.fmt.bytesToHex(digest, .lower);
     const approved = try parser.parse(context.arena.allocator(), &manifest, &.{ "build", "--prepare-isolated-source-keys", "--no-confirm", "--review-digest", &hex, path });
     try std.testing.expectError(error.PgpKeyImportDeclined, prepareSourcePgpKeyExport(&context.context, &approved.dispatch, &operations));
@@ -3664,12 +4084,53 @@ test "isolated source key preparation checks the digest and refuses unapproved i
     try temporary.dir.writeFile(io, .{ .sub_path = "public.asc", .data = @embedFile("fixtures/source-pgp/public.asc") });
     const public_path = try std.fs.path.join(allocator, &.{ directory, "public.asc" });
     defer allocator.free(public_path);
-    try source_pgp_transport.importKeys(allocator, io, environ, public_path);
+    try source_pgp_transport.importKeys(allocator, io, environ, public_path, null);
     const keys = try prepareSourcePgpKeyExport(&context.context, &approved.dispatch, &operations);
     defer context.context.allocator.free(keys);
     try std.testing.expect(std.mem.startsWith(u8, keys, "-----BEGIN PGP PUBLIC KEY BLOCK-----"));
     try temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content ++ "\n# changed\n" });
     try std.testing.expectError(error.ReviewedPkgbuildChanged, prepareSourcePgpKeyExport(&context.context, &approved.dispatch, &operations));
+}
+
+test "isolated child arguments keep host repository configuration outside the guest" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const manifest = try @import("../cli/spec.zig").Manifest.load(arena.allocator());
+    const digest = "ab" ** 32;
+    const host_config = "/var/lib/remora/build/.jobs/2883/dependency-environment/pacman.conf";
+    const cases = [_][]const []const u8{
+        &.{ "--config", host_config, "build", "--isolated", "--check", "/host/PKGBUILD" },
+        &.{ "--config=" ++ host_config, "build", "--isolated", "--check", "/host/PKGBUILD" },
+        &.{ "build", "--isolated", "--config", host_config, "--check", "/host/PKGBUILD" },
+        &.{ "build", "--isolated", "--config=" ++ host_config, "--check", "/host/PKGBUILD" },
+        &.{ "build", "--isolated", "--check", "/host/PKGBUILD" },
+    };
+    for (cases, 0..) |args, case_index| {
+        const guest = try buildIsolatedChildArguments(allocator, args, "/host/PKGBUILD", digest, false);
+        defer allocator.free(guest);
+        const parsed = try parser.parse(arena.allocator(), &manifest, guest);
+        try std.testing.expect(parsed == .dispatch);
+        try std.testing.expect(parsed.dispatch.globals.config_path == null);
+        for (guest) |argument| {
+            try std.testing.expect(std.mem.indexOf(u8, argument, host_config) == null);
+        }
+        try std.testing.expectEqual(@as(usize, 1), parsed.dispatch.positionals.len);
+        try std.testing.expectEqualStrings("/build/source/PKGBUILD", parsed.dispatch.positionals[0]);
+        try std.testing.expectEqualStrings(digest, optionValue(&parsed.dispatch, "--review-digest").?);
+        try std.testing.expect(optionEnabled(&parsed.dispatch, "--check"));
+        try std.testing.expect(optionEnabled(&parsed.dispatch, "--coordinator-child"));
+        try std.testing.expect(optionEnabled(&parsed.dispatch, "--nosign"));
+
+        // Guest filtering must leave the host's selected configuration intact.
+        const host = try parser.parse(arena.allocator(), &manifest, args);
+        try std.testing.expect(host == .dispatch);
+        if (case_index < cases.len - 1) {
+            try std.testing.expectEqualStrings(host_config, host.dispatch.globals.config_path.?);
+        } else {
+            try std.testing.expect(host.dispatch.globals.config_path == null);
+        }
+    }
 }
 
 test "isolated configuration preserves build policy and forces guest-local destinations" {
@@ -3680,6 +4141,8 @@ test "isolated configuration preserves build policy and forces guest-local desti
     );
     defer configuration.deinit();
     configuration.build.extra_path = &.{"/opt/guest-toolchain/bin"};
+    configuration.package.compression_level = .compact;
+    configuration.package.carch = "x86_64_v3";
     configuration.build.env = &.{
         .{ .name = "JAVA_HOME", .value = "/opt/guest-java" },
         .{ .name = "BUILD_ENV_LITERAL", .value = "$HOME/~/\"quoted\"\\path\n\t∂" },
@@ -3695,6 +4158,9 @@ test "isolated configuration preserves build policy and forces guest-local desti
     );
     defer parsed.deinit();
     try std.testing.expectEqualStrings(configuration.build.carch, parsed.build.carch);
+    try std.testing.expectEqual(configuration.package.compression_level, parsed.package.compression_level);
+    try std.testing.expectEqualStrings("x86_64_v3", parsed.package.carch.?);
+    try std.testing.expectEqualStrings("x86_64_v3", parsed.packageCarch());
     try std.testing.expectEqualStrings("/opt/guest-toolchain/bin", parsed.build.extra_path[0]);
     try std.testing.expectEqualStrings(configuration.build.cflags[0], parsed.build.cflags[0]);
     try std.testing.expectEqual(configuration.build.env.len, parsed.build.env.len);
@@ -3711,6 +4177,73 @@ test "isolated configuration preserves build policy and forces guest-local desti
     try std.testing.expectEqualStrings(isolated_build.guest_artifacts, parsed.destinations.packages.?);
     try std.testing.expect(!parsed.package.sign);
     try std.testing.expect(!parsed.sandbox.enabled);
+}
+
+test "compression presets parse both spellings override config and survive child transport" {
+    const spec = @import("../cli/spec.zig");
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const manifest = try spec.Manifest.load(arena.allocator());
+    for (1..6) |level| {
+        const value = try std.fmt.allocPrint(arena.allocator(), "{d}", .{level});
+        const inline_value = try std.fmt.allocPrint(arena.allocator(), "--compression-level={d}", .{level});
+        for ([_][]const []const u8{
+            &.{ "build", "--isolated", "--sync-deps", "--compression-level", value, "/tmp/PKGBUILD" },
+            &.{ "build", "--isolated", "--sync-deps", inline_value, "/tmp/PKGBUILD" },
+        }) |args| {
+            const configuration = try ShellyBuildConfiguration.initFromBuffers(allocator, "[package]\ncompression_level = 2\n", "[package]\ncompression_level = 4\n");
+            defer configuration.deinit();
+            const parsed = try parser.parse(arena.allocator(), &manifest, args);
+            try applyCompressionOverride(configuration, &parsed.dispatch);
+            try std.testing.expectEqual(level, @intFromEnum(configuration.package.compression_level.?));
+            const rendered = try renderIsolatedConfiguration(allocator, configuration);
+            defer allocator.free(rendered);
+            const guest = try ShellyBuildConfiguration.initFromBuffers(allocator, rendered, null);
+            defer guest.deinit();
+            try std.testing.expectEqual(configuration.package.compression_level, guest.package.compression_level);
+
+            const host_args = try buildChildArguments(allocator, args, null);
+            defer allocator.free(host_args);
+            const host = try parser.parse(arena.allocator(), &manifest, host_args);
+            try std.testing.expectEqual(configuration.package.compression_level, try compressionOverride(&host.dispatch));
+            const guest_args = try buildIsolatedChildArguments(allocator, args, "/tmp/PKGBUILD", "ab" ** 32, false);
+            defer allocator.free(guest_args);
+            const child = try parser.parse(arena.allocator(), &manifest, guest_args);
+            try std.testing.expectEqual(configuration.package.compression_level, try compressionOverride(&child.dispatch));
+        }
+    }
+    const absent = try parser.parse(arena.allocator(), &manifest, &.{"build"});
+    const configuration = try ShellyBuildConfiguration.initFromBuffers(allocator, null, null);
+    defer configuration.deinit();
+    try applyCompressionOverride(configuration, &absent.dispatch);
+    const rendered = try renderIsolatedConfiguration(allocator, configuration);
+    defer allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "compression_level") == null);
+    configuration.package.compression_level = .fast;
+    try applyCompressionOverride(configuration, &absent.dispatch);
+    try std.testing.expectEqual(compression_policy.Preset.fast, configuration.package.compression_level.?);
+    configuration.package.extension = ".pkg.tar.lz4";
+    try std.testing.expectError(error.UnsupportedCompressionPresetFormat, applyCompressionOverride(configuration, &absent.dispatch));
+}
+
+test "compression presets reject invalid CLI before elevation or PKGBUILD access" {
+    const spec = @import("../cli/spec.zig");
+    var context: test_support.TestContext = .{};
+    context.init();
+    defer context.deinit();
+    const manifest = try spec.Manifest.load(context.arena.allocator());
+    for ([_][]const u8{ "0", "6", "-1", "3.0", "fast", "", "999999999999999999999999" }) |value| {
+        context.stdout.writer.end = 0;
+        context.stderr.writer.end = 0;
+        const args = [_][]const u8{ "build", "--isolated", "--sync-deps", "--json", "--compression-level", value, "/nonexistent/PKGBUILD" };
+        const parsed = try parser.parse(context.arena.allocator(), &manifest, &args);
+        try std.testing.expectEqual(@as(?u8, 2), try dispatch(&context.context, &parsed.dispatch));
+        try std.testing.expect(std.mem.indexOf(u8, context.stderr.writer.buffered(), "integer from 1 to 5") != null);
+        try std.testing.expect(std.mem.indexOf(u8, context.stdout.writer.buffered(), "InvalidCompressionLevel") != null);
+    }
+    const missing = try parser.parse(context.arena.allocator(), &manifest, &.{ "build", "--compression-level" });
+    try std.testing.expect(missing == .failure);
 }
 
 test "isolated dependency state never inherits host installations" {
@@ -3763,7 +4296,7 @@ test "isolated dependency review refreshes local repositories without changing h
         .stdout = &output.writer,
         .stderr = &output.writer,
     };
-    var build = try (Zigalpm.pkgbuild.Parser{ .allocator = allocator, .io = io }).parser_content("pkgname=aqueous-git\npkgver=1\npkgrel=1\narch=('any')\n" ++
+    var build = try (PackageManager.pkgbuild.Parser{ .allocator = allocator, .io = io }).parser_content("pkgname=aqueous-git\npkgver=1\npkgrel=1\narch=('any')\n" ++
         "depends=('dms-aqueous>=2' 'aqueous-provider>=2')\n", null);
     defer build.deinit(allocator);
     const database_path = blk: {
@@ -3860,17 +4393,17 @@ test "sync deps child preserves implicit all-members selection" {
 }
 
 const fake_sync_deps_backend = struct {
-    fn installed(_: ?*anyopaque, dependency: [:0]const u8) bool {
+    fn installed(_: ?*anyopaque, dependency: [:0]const u8) anyerror!bool {
         return std.mem.eql(u8, dependency, "glibc");
     }
 
-    fn repo(_: ?*anyopaque, dependency: [:0]const u8) ?[]const u8 {
+    fn repo(_: ?*anyopaque, dependency: [:0]const u8) anyerror!?[]const u8 {
         if (std.mem.eql(u8, dependency, "cmake>=3")) return "cmake";
         if (std.mem.eql(u8, dependency, "meson")) return "meson";
         return null;
     }
 
-    fn backend() Zigalpm.aur.dependency_resolver.Backend {
+    fn backend() PackageManager.aur.dependency_resolver.Backend {
         return .{
             .context = null,
             .is_installed = installed,
@@ -3899,28 +4432,28 @@ const sync_deps_pkgbuild =
 
 test "sync deps resolution uses global inputs instead of split runtime dependencies" {
     const allocator = std.testing.allocator;
-    var cli_build = try (Zigalpm.pkgbuild.Parser{
+    var cli_build = try (PackageManager.pkgbuild.Parser{
         .allocator = allocator,
         .io = std.testing.io,
         .selected_package_name = "demo-cli",
     }).parser_content(sync_deps_pkgbuild, null);
     defer cli_build.deinit(allocator);
-    var docs_build = try (Zigalpm.pkgbuild.Parser{
+    var docs_build = try (PackageManager.pkgbuild.Parser{
         .allocator = allocator,
         .io = std.testing.io,
         .selected_package_name = "demo-docs",
     }).parser_content(sync_deps_pkgbuild, null);
     defer docs_build.deinit(allocator);
 
-    const builds = [_]Zigalpm.pkgbuild.parser.Pkgbuild{ cli_build, docs_build };
+    const builds = [_]PackageManager.pkgbuild.parser.Pkgbuild{ cli_build, docs_build };
 
     var plan = try resolveSyncDependencies(allocator, &builds, false, fake_sync_deps_backend.backend());
     defer plan.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), plan.repo_dependencies.len);
     try std.testing.expectEqualStrings("cmake", plan.repo_dependencies[0].name);
-    try std.testing.expectEqual(Zigalpm.aur.dependency_resolver.Role.build, plan.repo_dependencies[0].role);
+    try std.testing.expectEqual(PackageManager.aur.dependency_resolver.Role.build, plan.repo_dependencies[0].role);
     try std.testing.expectEqualStrings("meson", plan.repo_dependencies[1].name);
-    try std.testing.expectEqual(Zigalpm.aur.dependency_resolver.Role.check, plan.repo_dependencies[1].role);
+    try std.testing.expectEqual(PackageManager.aur.dependency_resolver.Role.check, plan.repo_dependencies[1].role);
     try std.testing.expectEqual(@as(usize, 0), plan.aur_dependencies.len);
 
     var unchecked = try resolveSyncDependencies(allocator, &builds, true, fake_sync_deps_backend.backend());
@@ -3954,7 +4487,7 @@ test "sync deps cleanup selects every new dependency and preserves prior or expl
 }
 
 test "sync deps cleanup context remains usable after parent cancellation" {
-    var parent = Zigalpm.OperationContext.init(std.testing.allocator, std.testing.io);
+    var parent = PackageManager.OperationContext.init(std.testing.allocator, std.testing.io);
     defer parent.deinit();
     parent.cancel();
 
@@ -3970,7 +4503,7 @@ test "sync deps cleanup failures are recoverable and identify every remaining pa
         recoverable: bool = false,
         names_present: bool = false,
 
-        fn event(data: ?*anyopaque, value: Zigalpm.OperationEvent) void {
+        fn event(data: ?*anyopaque, value: PackageManager.OperationEvent) void {
             const self: *@This() = @ptrCast(@alignCast(data.?));
             switch (value) {
                 .failure => |failure| {
@@ -3984,7 +4517,7 @@ test "sync deps cleanup failures are recoverable and identify every remaining pa
         }
     };
 
-    var operation_context = Zigalpm.OperationContext.init(std.testing.allocator, std.testing.io);
+    var operation_context = PackageManager.OperationContext.init(std.testing.allocator, std.testing.io);
     defer operation_context.deinit();
     var capture: Capture = .{};
     const subscription = try operation_context.subscribe(.{
@@ -4416,10 +4949,10 @@ test "issue 1880 preparation failure reaches JSON and persistent log before buil
 
 test "sync deps PipeWire split outputs do not provision their runtime providers" {
     const Backend = struct {
-        fn installed(_: ?*anyopaque, _: [:0]const u8) bool {
+        fn installed(_: ?*anyopaque, _: [:0]const u8) anyerror!bool {
             return false;
         }
-        fn repo(_: ?*anyopaque, dependency: [:0]const u8) ?[]const u8 {
+        fn repo(_: ?*anyopaque, dependency: [:0]const u8) anyerror!?[]const u8 {
             const known = [_][]const u8{ "jack2", "meson", "desktop-file-utils" };
             for (known) |name| if (std.mem.eql(u8, name, dependency)) return name;
             return null;
@@ -4455,18 +4988,18 @@ test "sync deps PipeWire split outputs do not provision their runtime providers"
         \\}
     ;
     const names = [_][]const u8{ "pipewire", "libpipewire", "pipewire-jack", "pipewire-jack-client", "pipewire-session-manager" };
-    var builds: [names.len]Zigalpm.pkgbuild.parser.Pkgbuild = undefined;
+    var builds: [names.len]PackageManager.pkgbuild.parser.Pkgbuild = undefined;
     var initialized: usize = 0;
     defer for (builds[0..initialized]) |*info| info.deinit(allocator);
     for (names, &builds) |name, *info| {
-        info.* = try (Zigalpm.pkgbuild.Parser{
+        info.* = try (PackageManager.pkgbuild.Parser{
             .allocator = allocator,
             .io = std.testing.io,
             .selected_package_name = name,
         }).parser_content(content, null);
         initialized += 1;
     }
-    const backend: Zigalpm.aur.dependency_resolver.Backend = .{ .context = null, .is_installed = Backend.installed, .find_repo_satisfier = Backend.repo };
+    const backend: PackageManager.aur.dependency_resolver.Backend = .{ .context = null, .is_installed = Backend.installed, .find_repo_satisfier = Backend.repo };
     var checked = try resolveSyncDependencies(allocator, &builds, false, backend);
     defer checked.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), checked.aur_dependencies.len);
@@ -4491,17 +5024,17 @@ test "sync deps PipeWire split outputs do not provision their runtime providers"
 
 test "sync deps keeps versioned global inputs even when a sibling will provide them" {
     const Backend = struct {
-        fn installed(_: ?*anyopaque, _: [:0]const u8) bool {
+        fn installed(_: ?*anyopaque, _: [:0]const u8) anyerror!bool {
             return false;
         }
-        fn repo(_: ?*anyopaque, dependency: [:0]const u8) ?[]const u8 {
+        fn repo(_: ?*anyopaque, dependency: [:0]const u8) anyerror!?[]const u8 {
             if (std.mem.eql(u8, dependency, "compiler>=2")) return "compiler";
             if (std.mem.eql(u8, dependency, "native-lib")) return "native-lib";
             return null;
         }
     };
     const allocator = std.testing.allocator;
-    var info = try (Zigalpm.pkgbuild.Parser{ .allocator = allocator, .io = std.testing.io, .package_carch = "x86_64" }).parser_content(
+    var info = try (PackageManager.pkgbuild.Parser{ .allocator = allocator, .io = std.testing.io, .package_carch = "x86_64" }).parser_content(
         \\pkgname=compiler
         \\pkgver=3
         \\pkgrel=1
@@ -4521,6 +5054,259 @@ test "sync deps keeps versioned global inputs even when a sibling will provide t
     try std.testing.expectEqual(@as(usize, 2), plan.repo_dependencies.len);
     try std.testing.expectEqual(@as(usize, 0), plan.aur_dependencies.len);
     try std.testing.expectEqualStrings("compiler", plan.repo_dependencies[0].name);
-    try std.testing.expectEqual(Zigalpm.aur.dependency_resolver.Role.runtime, plan.repo_dependencies[0].role);
+    try std.testing.expectEqual(PackageManager.aur.dependency_resolver.Role.runtime, plan.repo_dependencies[0].role);
     try std.testing.expectEqualStrings("native-lib", plan.repo_dependencies[1].name);
+}
+
+test "dependency plan CLI resolves bootstrap and checks with either native configuration filename" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(directory);
+    try temporary.dir.createDir(io, "mirror", .default_dir);
+    {
+        var file = try temporary.dir.createFile(io, "mirror/planning.db", .{});
+        defer file.close(io);
+        var buffer: [4096]u8 = undefined;
+        var writer = file.writer(io, &buffer);
+        var tar: std.tar.Writer = .{ .underlying_writer = &writer.interface };
+        var targets: std.ArrayList([]const u8) = .empty;
+        defer targets.deinit(allocator);
+        try targets.appendSlice(allocator, PackageManager.Manager.bootstrap.build_root.packages);
+        try targets.appendSlice(allocator, &.{ "recipe-tool", "check-tool" });
+        for (targets.items) |name| {
+            const desc = try std.fmt.allocPrint(allocator, "%NAME%\n{s}\n\n%VERSION%\n1-1\n\n%ARCH%\nany\n\n%FILENAME%\n{s}-1-1-any.pkg.tar\n\n%SHA256SUM%\n{s}\n\n", .{ name, name, "ab" ** 32 });
+            defer allocator.free(desc);
+            const entry = try std.fmt.allocPrint(allocator, "{s}-1-1/desc", .{name});
+            defer allocator.free(entry);
+            try tar.writeFileBytes(entry, desc, .{ .mode = 0o644 });
+        }
+        try tar.finishPedantically();
+        try writer.interface.flush();
+    }
+    const configuration = try std.fmt.allocPrint(allocator, "[options]\nArchitecture = x86_64\nDBPath = {s}/host-db\nCacheDir = {s}/host-cache\nLogFile = {s}/host.log\nSigLevel = Never\nInclude = {s}/repositories.conf\n", .{ directory, directory, directory, directory });
+    defer allocator.free(configuration);
+    const repos = try std.fmt.allocPrint(allocator, "[planning]\nServer = file://{s}/mirror\n", .{directory});
+    defer allocator.free(repos);
+    try temporary.dir.writeFile(io, .{ .sub_path = "repositories.conf", .data = repos });
+    try temporary.dir.writeFile(io, .{ .sub_path = "pacman.conf", .data = configuration });
+    try temporary.dir.writeFile(io, .{ .sub_path = "shelly.conf", .data = configuration });
+    try temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = "pkgname=plan-demo\npkgver=1\npkgrel=1\narch=('any')\nmakedepends=('recipe-tool')\ncheckdepends=('check-tool')\nbuild() { touch SHOULD_NOT_EXIST; }\ncheck() { touch SHOULD_NOT_EXIST; }\npackage() { depends=('output-only'); touch SHOULD_NOT_EXIST; }\n" });
+    const original_backend = PackageManager.Manager.defaultBackend();
+    defer PackageManager.Manager.setDefaultBackend(original_backend) catch unreachable;
+    for ([_]PackageManager.Manager.Backend{ .libalpm, .rlpm }) |backend| {
+        if (!backend.available()) continue;
+        try PackageManager.Manager.setDefaultBackend(backend);
+        var previous_digest: ?[]u8 = null;
+        defer if (previous_digest) |digest| allocator.free(digest);
+        for ([_][]const u8{ "pacman.conf", "shelly.conf" }) |filename| {
+            var context: test_support.TestContext = .{};
+            context.init();
+            defer context.deinit();
+            const a = context.arena.allocator();
+            context.context.environ = std.testing.environ;
+            context.context.config_path = try std.fs.path.join(a, &.{ directory, filename });
+            const path = try std.fs.path.join(a, &.{ directory, "PKGBUILD" });
+            const manifest = try @import("../cli/spec.zig").Manifest.load(a);
+            const parsed = try parser.parse(a, &manifest, &.{ "build", "--resolve-dependencies", "--isolated", "--json", "--check", path });
+            try std.testing.expectEqual(@as(?u8, 0), try dispatch(&context.context, &parsed.dispatch));
+            var report = try std.json.parseFromSlice(build_plan.Plan, a, context.stdout.written(), .{ .allocate = .alloc_always });
+            defer report.deinit();
+            try report.value.validate(a);
+            try std.testing.expect(report.value.check);
+            try std.testing.expectEqual(PackageManager.Manager.bootstrap.build_root.packages.len + 2, report.value.packages.len);
+            if (previous_digest) |digest| try std.testing.expectEqualStrings(digest, report.value.planDigest) else previous_digest = try allocator.dupe(u8, report.value.planDigest);
+            context.stdout.clearRetainingCapacity();
+            const unchecked = try parser.parse(a, &manifest, &.{ "build", "--resolve-dependencies", "--isolated", "--json", "--no-check", path });
+            try std.testing.expectEqual(@as(?u8, 0), try dispatch(&context.context, &unchecked.dispatch));
+            var without_checks = try std.json.parseFromSlice(build_plan.Plan, a, context.stdout.written(), .{ .allocate = .alloc_always });
+            defer without_checks.deinit();
+            try without_checks.value.validate(a);
+            try std.testing.expectEqual(report.value.packages.len - 1, without_checks.value.packages.len);
+            try std.testing.expect(!std.mem.eql(u8, report.value.planDigest, without_checks.value.planDigest));
+        }
+    }
+    for ([_][]const u8{ "SHOULD_NOT_EXIST", "host-db", "host-cache", "host.log" }) |path|
+        try std.testing.expectError(error.FileNotFound, temporary.dir.access(io, path, .{}));
+}
+
+test "dependency plan configuration digest covers included policy and strict read errors" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const path = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const config_path = try std.fs.path.join(a, &.{ path, "shelly.conf" });
+    try temporary.dir.writeFile(io, .{ .sub_path = "shelly.conf", .data = try std.fmt.allocPrint(a, "[options]\nInclude = {s}/policy.conf\n", .{path}) });
+    try temporary.dir.writeFile(io, .{ .sub_path = "policy.conf", .data = "Architecture = x86_64\nSigLevel = Never\n[local]\nServer = file:///repo-one\n" });
+    const Configuration = PackageManager.Manager.configuration.Configuration;
+    var config = try Configuration.parseStrict(a, io, config_path);
+    defer config.deinitialize();
+    const original = try build_plan.configurationDigest(a, &config);
+    try temporary.dir.writeFile(io, .{ .sub_path = "policy.conf", .data = "Architecture = x86_64\nSigLevel = Required\n[local]\nServer = file:///repo-two\n" });
+    var changed = try Configuration.parseStrict(a, io, config_path);
+    defer changed.deinitialize();
+    try std.testing.expect(!std.mem.eql(u8, original, try build_plan.configurationDigest(a, &changed)));
+    try temporary.dir.deleteFile(io, "policy.conf");
+    try std.testing.expectError(error.ConfigReadFailed, Configuration.parseStrict(a, io, config_path));
+}
+
+test "dependency plan flags reject host installation and stay out of the guest" {
+    var context: test_support.TestContext = .{};
+    context.init();
+    defer context.deinit();
+    const a = context.arena.allocator();
+    const manifest = try @import("../cli/spec.zig").Manifest.load(a);
+    const invalid = try parser.parse(a, &manifest, &.{ "build", "--resolve-dependencies", "--isolated", "--install", "--json", "/missing/PKGBUILD" });
+    try std.testing.expectEqual(@as(?u8, 2), try dispatch(&context.context, &invalid.dispatch));
+    for ([_][]const []const u8{
+        &.{ "build", "--isolated", "--dependency-plan", "/host/plan.json", "/host/PKGBUILD" },
+        &.{ "build", "--isolated", "--dependency-plan=/host/plan.json", "/host/PKGBUILD" },
+    }) |args| {
+        const guest = try buildIsolatedChildArguments(a, args, "/host/PKGBUILD", "ab" ** 32, false);
+        for (guest) |arg| try std.testing.expect(std.mem.indexOf(u8, arg, "dependency-plan") == null);
+    }
+}
+
+test "dependency plan failures retain every issue in stderr transaction log and build JSON" {
+    const Runner = struct {
+        result: ?BuildCommandResult = null,
+        child_json: ?[]const u8 = null,
+        child_exit_code: u8 = 1,
+
+        fn run(_: *@This(), context: *runtime.RuntimeContext, operations: *PackageManager.OperationContext, _: *const parser.Invocation) !void {
+            var operation = operations.begin(.{ .backend = .aur, .kind = .build, .subject = "python-virtualenv" });
+            defer operation.finish(.failed);
+            // Match the coordinator's short-lived parsed review/plan storage.
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const issues = try arena.allocator().dupe(build_plan.Unresolved, &.{
+                .{ .requirement = "python-hatchling>=1", .requiredBy = "PKGBUILD", .code = "not_in_repositories" },
+                .{ .requirement = "python-platformdirs>=4", .requiredBy = "python-virtualenv", .code = "unsatisfied_dependency" },
+                .{ .requirement = "python-filelock", .requiredBy = "python-virtualenv", .code = "not_in_environment" },
+                .{ .requirement = "python-distlib", .requiredBy = "devario-libs", .code = "missing_artifact_sha256" },
+                .{ .requirement = "transaction", .requiredBy = "environment", .code = "ConflictingDependencies" },
+            });
+            for (issues) |*issue| {
+                issue.requirement = try arena.allocator().dupe(u8, issue.requirement);
+                issue.requiredBy = try arena.allocator().dupe(u8, issue.requiredBy);
+                issue.code = try arena.allocator().dupe(u8, issue.code);
+            }
+            try validateBuildDependencyPlan(context, &operation, .{
+                .reviewDigest = "",
+                .configurationDigest = "",
+                .buildPolicyDigest = "",
+                .backend = "rlpm",
+                .bootstrapProfile = "rlpm-only",
+                .architectures = &.{"x86_64"},
+                .check = false,
+                .repositories = &.{},
+                .requirements = &.{},
+                .unresolved = issues,
+            }, "python-virtualenv", "/build/PKGBUILD");
+        }
+
+        fn setFailure(_: *@This(), _: std.mem.Allocator, _: anyerror) !void {}
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(directory);
+    const log_path = try std.fs.path.join(allocator, &.{ directory, "shelly.log" });
+    defer allocator.free(log_path);
+    const rotated_path = try std.fmt.allocPrint(allocator, "{s}.1", .{log_path});
+    defer allocator.free(rotated_path);
+    const log = @import("../runtime/log.zig");
+    var session = log.SessionLog.tryOpenAt(io, log_path, rotated_path) orelse return error.CouldNotOpenTestLog;
+    defer session.close();
+    var transaction_log = log.TransactionLog.init(&session, allocator);
+    var context: test_support.TestContext = .{};
+    context.init();
+    defer context.deinit();
+    context.context.transaction_log = &transaction_log;
+    var diagnostic: ?PackageManager.pkgbuild.parser.Diagnostic = null;
+    defer if (diagnostic) |*value| value.deinit();
+    context.context.preparation_diagnostic = &diagnostic;
+    const a = context.arena.allocator();
+    const manifest = try @import("../cli/spec.zig").Manifest.load(a);
+    const parsed = try parser.parse(a, &manifest, &.{ "build", "--isolated", "--json", "--no-confirm", "/build/PKGBUILD" });
+    var runner: Runner = .{};
+    try std.testing.expectEqual(@as(u8, 1), try executeJson(&context.context, &parsed.dispatch, &runner));
+
+    const contents = try temporary.dir.readFileAlloc(io, "shelly.log", allocator, .limited(64 * 1024));
+    defer allocator.free(contents);
+    var document = try std.json.parseFromSlice(std.json.Value, allocator, context.stdout.written(), .{});
+    defer document.deinit();
+    try std.testing.expect(!document.value.object.get("success").?.bool);
+    const failure = document.value.object.get("error").?.object;
+    try std.testing.expectEqualStrings("IncompleteDependencyPlan", failure.get("code").?.string);
+    const message = failure.get("message").?.string;
+    for ([_][]const u8{
+        "python-hatchling>=1 (required by PKGBUILD): not found in configured repositories [not_in_repositories]",
+        "python-platformdirs>=4 (required by python-virtualenv): no package satisfies the dependency [unsatisfied_dependency]",
+        "python-filelock (required by python-virtualenv): missing from the resolved build environment [not_in_environment]",
+        "python-distlib (required by devario-libs): repository metadata has no valid SHA-256 archive hash [missing_artifact_sha256]",
+        "transaction (required by environment): dependency resolution failed [ConflictingDependencies]",
+    }) |expected| {
+        try std.testing.expect(std.mem.indexOf(u8, context.stderr.written(), expected) != null);
+        try std.testing.expect(std.mem.indexOf(u8, contents, expected) != null);
+        try std.testing.expect(std.mem.indexOf(u8, message, expected) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, context.stderr.written(), "python-hatchling>=1"));
+    try std.testing.expectEqualStrings("dependencies", failure.get("context").?.object.get("field").?.string);
+    try std.testing.expectEqualStrings(log_path, failure.get("context").?.object.get("logPath").?.string);
+}
+
+test "dependency plan validation reports all bad hashes and accepts complete plans quietly" {
+    const allocator = std.testing.allocator;
+    var context: test_support.TestContext = .{};
+    context.init();
+    defer context.deinit();
+    context.context.allocator = allocator;
+    var diagnostic: ?PackageManager.pkgbuild.parser.Diagnostic = null;
+    defer if (diagnostic) |*value| value.deinit();
+    context.context.preparation_diagnostic = &diagnostic;
+    var operations = PackageManager.OperationContext.init(allocator, std.testing.io);
+    defer operations.deinit();
+    var operation = operations.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.failed);
+    var packages = [_]PackageManager.Manager.build_transaction.Package{
+        .{ .name = "first", .repository = "fixture", .version = "1-1", .architecture = "any", .filename = "first.pkg.tar", .sha256 = null, .depends = &.{}, .provides = &.{}, .groups = &.{} },
+        .{ .name = "second", .repository = "fixture", .version = "1-1", .architecture = "any", .filename = "second.pkg.tar", .sha256 = "bad", .depends = &.{}, .provides = &.{}, .groups = &.{} },
+    };
+    var plan: build_plan.Plan = .{
+        .complete = true,
+        .reviewDigest = "",
+        .configurationDigest = "",
+        .buildPolicyDigest = "",
+        .backend = "rlpm",
+        .bootstrapProfile = "rlpm-only",
+        .architectures = &.{"x86_64"},
+        .check = false,
+        .repositories = &.{},
+        .requirements = &.{},
+        .packages = &packages,
+    };
+    {
+        const digest = try plan.digest(allocator);
+        defer allocator.free(digest);
+        plan.planDigest = digest;
+        try std.testing.expectError(error.MissingArtifactHash, validateBuildDependencyPlan(&context.context, &operation, plan, "demo", "/PKGBUILD"));
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.?.message, "first (repository fixture)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.?.message, "second (repository fixture)") != null);
+    }
+    diagnostic.?.deinit();
+    diagnostic = null;
+    for (&packages) |*package| package.sha256 = "ab" ** 32;
+    const digest = try plan.digest(allocator);
+    defer allocator.free(digest);
+    plan.planDigest = digest;
+    try validateBuildDependencyPlan(&context.context, &operation, plan, "demo", "/PKGBUILD");
+    try std.testing.expect(diagnostic == null);
 }

@@ -5,14 +5,16 @@
 //! bind mounted into the container.
 
 const std = @import("std");
-const Zigalpm = @import("Zigalpm");
+const diagnostics = @import("diagnostics");
+const PackageManager = @import("PackageManager");
+const build_root = PackageManager.Manager.bootstrap.build_root;
 
 pub const build_uid = "1000";
 pub const build_user = "shelly-build";
 pub const guest_source = "/build/source";
 pub const guest_artifacts = "/build/artifacts";
 
-/// Package identity retained from libalpm validation. Filenames are kept
+/// Package identity retained from native backend validation. Filenames are kept
 /// separately from package names because archive naming is not an API.
 pub const ValidatedArtifact = struct {
     package_name: []u8,
@@ -51,10 +53,10 @@ pub const guest_source_keys = "/" ++ source_keys_relative;
 const operation_parent = "/var/lib/shelly/build-roots/v1/operations";
 
 const BootstrapOutputContext = struct {
-    operation: *const Zigalpm.Operation,
+    operation: *const PackageManager.Operation,
     stage: []const u8 = "build.isolation.bootstrap",
 
-    fn handle(data: ?*anyopaque, stream: Zigalpm.process_runner.StreamKind, line: []const u8) void {
+    fn handle(data: ?*anyopaque, stream: PackageManager.process_runner.StreamKind, line: []const u8) void {
         const self: *BootstrapOutputContext = @ptrCast(@alignCast(data.?));
         self.operation.status(
             if (stream == .stderr) .warning else .information,
@@ -100,7 +102,7 @@ pub const Root = struct {
         try createGuestLayout(allocator, io, root_path);
         try std.Io.Dir.cwd().createDirPath(io, source_path);
         try std.Io.Dir.cwd().createDirPath(io, artifact_path);
-        const marker_path = try std.fs.path.join(allocator, &.{ root_path, Zigalpm.alpm.bootstrap.marker_name });
+        const marker_path = try std.fs.path.join(allocator, &.{ root_path, PackageManager.Manager.bootstrap.marker_name });
         defer allocator.free(marker_path);
         try std.Io.Dir.cwd().writeFile(io, .{
             .sub_path = marker_path,
@@ -128,7 +130,7 @@ pub const Root = struct {
         self.* = undefined;
     }
 
-    /// Bootstraps a clean Arch root through Shelly's own libalpm backend. The
+    /// Bootstraps a clean Arch root through Shelly's selected native backend. The
     /// helper process is isolated in a private mount/PID namespace so package
     /// scriptlets receive the standard virtual filesystems without introducing
     /// mounts into the coordinator's namespace.
@@ -137,21 +139,60 @@ pub const Root = struct {
         environ: std.process.Environ,
         executable: []const u8,
         extra_packages: []const []const u8,
-        operation: *const Zigalpm.Operation,
+        config_path: ?[]const u8,
+        operation: *const PackageManager.Operation,
     ) !void {
-        const argv = try shellystrapArguments(
+        return self.bootstrapImpl(environ, executable, extra_packages, config_path, null, operation);
+    }
+
+    pub fn bootstrapPlanned(self: *Root, environ: std.process.Environ, executable: []const u8, config_path: ?[]const u8, plan: []const u8, operation: *const PackageManager.Operation) !void {
+        return self.bootstrapImpl(environ, executable, &.{}, config_path, plan, operation);
+    }
+
+    fn bootstrapImpl(self: *Root, environ: std.process.Environ, executable: []const u8, extra_packages: []const []const u8, config_path: ?[]const u8, plan: ?[]const u8, operation: *const PackageManager.Operation) !void {
+        try self.validateRuntimeAt(environ, operation, executable);
+        const Configuration = PackageManager.Manager.configuration.Configuration;
+        var config = try (if (config_path != null) &Configuration.parseStrict else &Configuration.parse)(
+            self.allocator,
+            self.io,
+            config_path orelse PackageManager.paths.config_file,
+        );
+        defer config.deinitialize();
+        if (plan) |bytes| {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const parsed = try std.json.parseFromSlice(PackageManager.Manager.build_plan.Plan, a, bytes, .{});
+            try parsed.value.validate(a);
+            const digest = try PackageManager.Manager.build_plan.configurationDigest(a, &config);
+            if (!std.mem.eql(u8, digest, parsed.value.configurationDigest)) return error.DependencyPlanMismatch;
+        }
+        const argv = try shellystrapArgumentsWithConfig(
             self.allocator,
             executable,
             self.root_path,
             extra_packages,
+            config_path,
+            config.gpg_directory,
         );
         defer self.allocator.free(argv);
+        var planned_arguments: std.ArrayList([]const u8) = .empty;
+        defer planned_arguments.deinit(self.allocator);
+        const plan_path = try std.fs.path.join(self.allocator, &.{ self.operation_path, "dependency-plan.json" });
+        defer self.allocator.free(plan_path);
+        if (plan) |bytes| {
+            try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = plan_path, .data = bytes, .flags = .{ .permissions = .fromMode(0o600) } });
+            for (argv) |argument| {
+                if (std.mem.eql(u8, argument, "--")) try planned_arguments.appendSlice(self.allocator, &.{ "--dependency-plan", plan_path });
+                try planned_arguments.append(self.allocator, argument);
+            }
+        }
         var output_context: BootstrapOutputContext = .{ .operation = operation };
-        const exit_code = try Zigalpm.process_runner.runStreamingWithEnvironmentOperation(
+        const exit_code = try PackageManager.process_runner.runStreamingWithEnvironmentOperation(
             self.allocator,
             self.io,
             environ,
-            argv,
+            if (plan != null) planned_arguments.items else argv,
             null,
             null,
             .{ .function = BootstrapOutputContext.handle, .data = &output_context },
@@ -159,7 +200,7 @@ pub const Root = struct {
         );
         try checkIsolatedExit(operation, .bootstrap, exit_code);
 
-        const marker_path = try self.rootJoin(Zigalpm.alpm.bootstrap.marker_name);
+        const marker_path = try self.rootJoin(PackageManager.Manager.bootstrap.marker_name);
         defer self.allocator.free(marker_path);
         std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
 
@@ -209,7 +250,7 @@ pub const Root = struct {
         environ: std.process.Environ,
         pkgbuild_contents: []const u8,
         reviewed_files: anytype,
-        operation: *const Zigalpm.Operation,
+        operation: *const PackageManager.Operation,
     ) !void {
         try self.writeReviewedInput("PKGBUILD", pkgbuild_contents, 0o644);
         for (reviewed_files) |file|
@@ -265,6 +306,52 @@ pub const Root = struct {
         try file.setPermissions(self.io, .fromMode(0o644));
     }
 
+    /// Check the complete dynamic dependency closure inside the guest before
+    /// starting the build. Both worker modes use the staged executable.
+    pub fn validateRuntime(self: *Root, environ: std.process.Environ, operation: *const PackageManager.Operation) !void {
+        try self.validateRuntimeAt(environ, operation, null);
+    }
+
+    // Inspect host executables before provisioning, then repeat against guest
+    // libraries after staging.
+    fn validateRuntimeAt(self: *Root, environ: std.process.Environ, operation: *const PackageManager.Operation, host_executable: ?[]const u8) !void {
+        if (comptime !build_root.rlpm_only) return;
+        const Capture = struct {
+            operation: *const PackageManager.Operation,
+            missing: bool = false,
+            forbidden: bool = false,
+            static: bool = false,
+            fn line(data: ?*anyopaque, _: PackageManager.process_runner.StreamKind, value: []const u8) void {
+                const capture: *@This() = @ptrCast(@alignCast(data.?));
+                capture.static = capture.static or std.mem.indexOf(u8, value, "not a dynamic executable") != null or std.mem.indexOf(u8, value, "statically linked") != null;
+                const missing = std.mem.indexOf(u8, value, "not found") != null;
+                const forbidden = std.mem.indexOf(u8, value, "libalpm.so") != null;
+                capture.missing = capture.missing or missing;
+                capture.forbidden = capture.forbidden or forbidden;
+                if (missing or forbidden) capture.operation.status(.warning, value, "build.isolation.runtime", null);
+            }
+        };
+        const path = host_executable orelse guest_executable;
+        var capture: Capture = .{ .operation = operation };
+        const argv: []const []const u8 = if (host_executable != null)
+            &.{ "/usr/bin/env", "LC_ALL=C", "/usr/bin/ldd", path }
+        else
+            &.{ "/usr/bin/chroot", self.root_path, "/usr/bin/env", "LC_ALL=C", "/usr/bin/ldd", path };
+        const status = try PackageManager.process_runner.runStreamingWithEnvironmentOperation(
+            self.allocator,
+            self.io,
+            environ,
+            argv,
+            null,
+            null,
+            .{ .function = Capture.line, .data = &capture },
+            operation,
+        );
+        try operation.checkCancelled();
+        if (capture.forbidden) return error.UnexpectedBuildRuntimeDependency;
+        if (capture.missing or (status != 0 and !capture.static)) return error.MissingBuildRuntime;
+    }
+
     pub fn writeBuildConfiguration(self: *Root, contents: []const u8) !void {
         const path = try self.rootJoin("etc/shellybuild.conf");
         defer self.allocator.free(path);
@@ -282,11 +369,24 @@ pub const Root = struct {
         self: *Root,
         environ: std.process.Environ,
         child_arguments: []const []const u8,
-        operation: *const Zigalpm.Operation,
+        operation: *const PackageManager.Operation,
     ) !void {
         const argv = try nspawnArguments(self.allocator, self.root_path, child_arguments);
         defer self.allocator.free(argv);
         try self.runCancellable(environ, argv, operation, .build);
+    }
+
+    pub fn readPkgverChange(self: *Root, original: []const u8) !?[]u8 {
+        var directory = try std.Io.Dir.cwd().openDir(self.io, self.source_path, .{ .follow_symlinks = false });
+        defer directory.close(self.io);
+        const file = try directory.openFile(self.io, "PKGBUILD", .{ .follow_symlinks = false });
+        defer file.close(self.io);
+        if ((try file.stat(self.io)).kind != .file) return error.InvalidPkgbuildPath;
+        var buffer: [4096]u8 = undefined;
+        var reader = file.reader(self.io, &buffer);
+        const updated = try reader.interface.allocRemaining(self.allocator, .limited(32 * 1024 * 1024));
+        defer self.allocator.free(updated);
+        return PackageManager.builder.pkgver_update.extractChange(self.allocator, original, updated);
     }
 
     pub fn exportArtifacts(
@@ -400,11 +500,11 @@ pub const Root = struct {
         self: *Root,
         environ: std.process.Environ,
         argv: []const []const u8,
-        operation: *const Zigalpm.Operation,
+        operation: *const PackageManager.Operation,
         stage: IsolatedStage,
     ) !void {
         var output_context: BootstrapOutputContext = .{ .operation = operation, .stage = stage.name() };
-        const exit_code = try Zigalpm.process_runner.runStreamingWithEnvironmentOperation(
+        const exit_code = try PackageManager.process_runner.runStreamingWithEnvironmentOperation(
             self.allocator,
             self.io,
             environ,
@@ -432,14 +532,14 @@ const IsolatedStage = enum {
     }
 };
 
-fn checkIsolatedExit(operation: *const Zigalpm.Operation, stage: IsolatedStage, exit_code: u8) !void {
+fn checkIsolatedExit(operation: *const PackageManager.Operation, stage: IsolatedStage, exit_code: u8) !void {
     if (exit_code == 0) return;
     const failure = switch (stage) {
-        .bootstrap => error.IsolatedBootstrapFailed,
+        .bootstrap => if (exit_code == PackageManager.Manager.bootstrap.plan_mismatch_exit_code) error.DependencyPlanMismatch else error.IsolatedBootstrapFailed,
         .setup => error.IsolatedCommandFailed,
         .build => error.IsolatedBuildFailed,
     };
-    operation.reportError(failure, @import("diagnostics").cause(failure), stage.name(), exit_code, false);
+    operation.reportError(failure, diagnostics.cause(failure), stage.name(), exit_code, false);
     return failure;
 }
 
@@ -450,7 +550,7 @@ test "isolated command failures preserve the stage and native exit code" {
         domain: ?[]const u8 = null,
         code: ?i64 = null,
 
-        fn handle(data: ?*anyopaque, event: Zigalpm.OperationEvent) void {
+        fn handle(data: ?*anyopaque, event: PackageManager.OperationEvent) void {
             const self: *@This() = @ptrCast(@alignCast(data.?));
             if (event == .failure) {
                 self.count += 1;
@@ -460,7 +560,7 @@ test "isolated command failures preserve the stage and native exit code" {
             }
         }
     };
-    var context = Zigalpm.OperationContext.init(std.testing.allocator, std.testing.io);
+    var context = PackageManager.OperationContext.init(std.testing.allocator, std.testing.io);
     defer context.deinit();
     var capture: Capture = .{};
     _ = try context.subscribe(.{ .function = Capture.handle, .data = &capture });
@@ -475,6 +575,7 @@ test "isolated command failures preserve the stage and native exit code" {
     try std.testing.expectError(error.IsolatedBootstrapFailed, checkIsolatedExit(&operation, .bootstrap, 7));
     try std.testing.expectEqualStrings("build.isolation.bootstrap", capture.domain.?);
     try std.testing.expectEqual(@as(i64, 7), capture.code.?);
+    try std.testing.expectError(error.DependencyPlanMismatch, checkIsolatedExit(&operation, .bootstrap, PackageManager.Manager.bootstrap.plan_mismatch_exit_code));
     try std.testing.expectError(error.IsolatedCommandFailed, checkIsolatedExit(&operation, .setup, 2));
     try std.testing.expectEqualStrings("build.isolation.setup", capture.domain.?);
     try std.testing.expectEqual(@as(i64, 2), capture.code.?);
@@ -504,6 +605,17 @@ pub fn shellystrapArguments(
     root_path: []const u8,
     extra_packages: []const []const u8,
 ) ![]const []const u8 {
+    return shellystrapArgumentsWithConfig(allocator, executable, root_path, extra_packages, null, PackageManager.paths.keyring);
+}
+
+pub fn shellystrapArgumentsWithConfig(
+    allocator: std.mem.Allocator,
+    executable: []const u8,
+    root_path: []const u8,
+    extra_packages: []const []const u8,
+    config_path: ?[]const u8,
+    gpg_directory: []const u8,
+) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{
@@ -511,25 +623,32 @@ pub fn shellystrapArguments(
         "--fork",
         "--pid",
         "--mount",
+        "--mount-proc",
         "--propagation",
         "private",
         "--kill-child=KILL",
         "--forward-signals",
         executable,
-        Zigalpm.alpm.bootstrap.wrapper_argument,
+        PackageManager.Manager.bootstrap.wrapper_argument,
+        "--backend",
+        @tagName(PackageManager.Manager.defaultBackend()),
         "--root",
         root_path,
         "--config",
-        "/etc/pacman.conf",
+        config_path orelse PackageManager.paths.config_file,
         "--gpgdir",
-        "/etc/pacman.d/gnupg",
+        gpg_directory,
         "--",
-        "base",
-        "base-devel",
-        "git",
-        "ca-certificates",
     });
-    try argv.appendSlice(allocator, extra_packages);
+    const packages_start = argv.items.len;
+    try argv.appendSlice(allocator, build_root.packages);
+    // Reviewed recipe dependencies can already be part of the bootstrap
+    // profile. Submit each exact target once; retain repository qualifiers and
+    // version constraints for the backend to validate.
+    for (extra_packages) |package| {
+        if (!containsArgument(argv.items[packages_start..], package))
+            try argv.append(allocator, package);
+    }
     return argv.toOwnedSlice(allocator);
 }
 
@@ -599,26 +718,63 @@ pub fn isPackageArtifact(name: []const u8) bool {
 
 test "shellystrap invocation uses a private cancellable namespace and native helper" {
     const root_path = "/var/lib/shelly/build-roots/v1/operations/0123456789abcdef0123456789abcdef/root";
+    const original = PackageManager.Manager.defaultBackend();
+    defer PackageManager.Manager.setDefaultBackend(original) catch unreachable;
+    for ([_]PackageManager.Manager.Backend{ .libalpm, .rlpm }) |backend| {
+        if (!backend.available()) {
+            try std.testing.expectError(error.BackendUnavailable, PackageManager.Manager.setDefaultBackend(backend));
+            continue;
+        }
+        try PackageManager.Manager.setDefaultBackend(backend);
+        const argv = try shellystrapArguments(
+            std.testing.allocator,
+            "/usr/bin/shelly",
+            root_path,
+            &.{ "cmake", "ninja" },
+        );
+        defer std.testing.allocator.free(argv);
+
+        try std.testing.expectEqualStrings("/usr/bin/unshare", argv[0]);
+        try std.testing.expect(containsArgument(argv, "--mount"));
+        try std.testing.expect(containsArgument(argv, "--pid"));
+        try std.testing.expect(containsArgument(argv, "--mount-proc"));
+        try std.testing.expect(containsArgument(argv, @tagName(backend)));
+        try std.testing.expect(containsArgument(argv, "private"));
+        try std.testing.expect(containsArgument(argv, "--kill-child=KILL"));
+        try std.testing.expect(containsArgument(argv, "--forward-signals"));
+        try std.testing.expect(containsArgument(argv, PackageManager.Manager.bootstrap.wrapper_argument));
+        try std.testing.expect(containsArgument(argv, root_path));
+        try std.testing.expectEqual(PackageManager.Manager.libalpm_enabled, containsArgument(argv, "base-devel"));
+        if (comptime build_root.rlpm_only) {
+            try std.testing.expect(!containsArgument(argv, "base"));
+            try std.testing.expect(!containsArgument(argv, "pacman"));
+            try std.testing.expect(!containsArgument(argv, "archlinux-keyring"));
+            for ([_][]const u8{ "gcc", "systemd", "gnupg", "libarchive", "curl", "sqlite" }) |name|
+                try std.testing.expect(containsArgument(argv, name));
+        }
+        try std.testing.expect(containsArgument(argv, "cmake"));
+        try std.testing.expect(containsArgument(argv, "ninja"));
+        try std.testing.expect(!containsArgument(argv, "/usr/bin/pacstrap"));
+    }
+}
+
+test "shellystrap merges overlapping recipe dependencies without dropping target constraints" {
     const argv = try shellystrapArguments(
         std.testing.allocator,
         "/usr/bin/shelly",
-        root_path,
-        &.{ "cmake", "ninja" },
+        "/var/lib/shelly/build-roots/v1/operations/fixture/root",
+        &.{ "git", "pkgconf", "gettext", "ca-certificates", "cmake", "cmake", "git>=2", "testing/git" },
     );
     defer std.testing.allocator.free(argv);
-
-    try std.testing.expectEqualStrings("/usr/bin/unshare", argv[0]);
-    try std.testing.expect(containsArgument(argv, "--mount"));
-    try std.testing.expect(containsArgument(argv, "--pid"));
-    try std.testing.expect(containsArgument(argv, "private"));
-    try std.testing.expect(containsArgument(argv, "--kill-child=KILL"));
-    try std.testing.expect(containsArgument(argv, "--forward-signals"));
-    try std.testing.expect(containsArgument(argv, Zigalpm.alpm.bootstrap.wrapper_argument));
-    try std.testing.expect(containsArgument(argv, root_path));
-    try std.testing.expect(containsArgument(argv, "base-devel"));
-    try std.testing.expect(containsArgument(argv, "cmake"));
-    try std.testing.expect(containsArgument(argv, "ninja"));
-    try std.testing.expect(!containsArgument(argv, "/usr/bin/pacstrap"));
+    const packages = for (argv, 0..) |argument, index| {
+        if (std.mem.eql(u8, argument, "--")) break argv[index + 1 ..];
+    } else unreachable;
+    for (packages, 0..) |package, index|
+        try std.testing.expect(!containsArgument(packages[0..index], package));
+    for (build_root.packages) |package|
+        try std.testing.expect(containsArgument(packages, package));
+    for ([_][]const u8{ "git", "pkgconf", "gettext", "ca-certificates", "cmake", "git>=2", "testing/git" }) |package|
+        try std.testing.expect(containsArgument(packages, package));
 }
 
 test "nspawn invocation is unprivileged namespaced and contains no host binds" {
@@ -650,6 +806,35 @@ test "operation paths are restricted to random children of the managed parent" {
     try validateOperationPath("/var/lib/shelly/build-roots/v1/operations/0123456789abcdef0123456789abcdef");
     try std.testing.expectError(error.InvalidIsolationPath, validateOperationPath("/"));
     try std.testing.expectError(error.InvalidIsolationPath, validateOperationPath("/var/lib/shelly/build-roots/v1/operations/../host"));
+}
+
+test "isolated pkgver guest transport rejects unrelated edits and symlinks" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const source_path = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(source_path);
+    var root: Root = .{
+        .allocator = allocator,
+        .io = io,
+        .operation_path = source_path,
+        .root_path = source_path,
+        .source_path = source_path,
+        .artifact_path = source_path,
+    };
+    const original = "pkgname=demo\npkgver=1\npkgrel=7\narch=('any')\npackage() { :; }\n";
+    const updated = try PackageManager.builder.pkgver_update.render(allocator, original, "r2.gabc");
+    defer allocator.free(updated);
+    try temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = updated });
+    const version = (try root.readPkgverChange(original)).?;
+    defer allocator.free(version);
+    try std.testing.expectEqualStrings("r2.gabc", version);
+    try temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = original ++ "# unrelated edit\n" });
+    try std.testing.expectError(error.ReviewedPkgbuildChanged, root.readPkgverChange(original));
+    try temporary.dir.deleteFile(io, "PKGBUILD");
+    try temporary.dir.symLink(io, "/etc/passwd", "PKGBUILD", .{});
+    try std.testing.expectError(error.SymLinkLoop, root.readPkgverChange(original));
 }
 
 test "reviewed input paths cannot escape the staged source root" {
@@ -729,9 +914,9 @@ test "staged reviewed inputs preserve the host digest and reject real changes" {
     try host.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
     try host.dir.writeFile(io, .{ .sub_path = "related.txt", .data = "reviewed\n" });
     try host.dir.setFilePermissions(io, "related.txt", .fromMode(0o660), .{});
-    var host_build = try (Zigalpm.pkgbuild.Parser{ .allocator = allocator, .io = io }).parser_content(content, host_path);
+    var host_build = try (PackageManager.pkgbuild.Parser{ .allocator = allocator, .io = io }).parser_content(content, host_path);
     defer host_build.deinit(allocator);
-    var review = try Zigalpm.builder.preparePkgbuildReview(allocator, io, host_path, content, &.{host_build});
+    var review = try PackageManager.builder.preparePkgbuildReview(allocator, io, host_path, content, &.{host_build});
     defer review.deinit();
     try std.testing.expectEqual(@as(usize, 1), review.reviewed_files.len);
     try std.testing.expectEqual(@as(u32, 0o660), review.reviewed_files[0].permissions);
@@ -751,9 +936,9 @@ test "staged reviewed inputs preserve the host digest and reject real changes" {
 
     const staged_content = try guest.dir.readFileAlloc(io, "PKGBUILD", allocator, .limited(1024));
     defer allocator.free(staged_content);
-    var guest_build = try (Zigalpm.pkgbuild.Parser{ .allocator = allocator, .io = io }).parser_content(staged_content, guest_path);
+    var guest_build = try (PackageManager.pkgbuild.Parser{ .allocator = allocator, .io = io }).parser_content(staged_content, guest_path);
     defer guest_build.deinit(allocator);
-    var guest_review = try Zigalpm.builder.preparePkgbuildReview(allocator, io, guest_path, staged_content, &.{guest_build});
+    var guest_review = try PackageManager.builder.preparePkgbuildReview(allocator, io, guest_path, staged_content, &.{guest_build});
     defer guest_review.deinit();
     try std.testing.expectEqualSlices(u8, &review.digest, &guest_review.digest);
     try review.verifyCurrent(allocator, io, guest_pkgbuild, guest_path);
@@ -986,4 +1171,12 @@ test "failed or cancelled isolated roots remove their complete operation directo
         error.FileNotFound,
         temporary.dir.access(io, "operation", .{}),
     );
+}
+
+test "shellystrap forwards the selected native configuration and keyring" {
+    const args = try shellystrapArgumentsWithConfig(std.testing.allocator, "/usr/bin/shelly", "/target", &.{}, "/custom/shelly.conf", "/custom/gnupg");
+    defer std.testing.allocator.free(args);
+    try std.testing.expect(containsArgument(args, "/custom/shelly.conf"));
+    try std.testing.expect(containsArgument(args, "/custom/gnupg"));
+    try std.testing.expect(!containsArgument(args, PackageManager.paths.config_file));
 }

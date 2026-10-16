@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const bindings = @import("Shelly_Ui_Gtk");
 const gtk = bindings.gtk;
 const gio = bindings.gio;
@@ -19,6 +20,7 @@ const ShellyCommands = @import("../services/shelly_operation.zig").ShellyCommand
 const ShellyConfig = @import("../models/shelly_config.zig").ShellyConfig;
 const runtime = @import("../services/runtime.zig");
 const translations = @import("../helpers/translations.zig");
+const a11y = @import("../helpers/a11y.zig");
 const sorters = @import("../helpers/sorters.zig");
 
 pub const ShellySearchPage = extern struct {
@@ -324,14 +326,17 @@ pub const ShellySearchPage = extern struct {
 
                 const ood_icon = gtk.Image.newFromIconName("dialog-warning-symbolic");
                 gtk.Widget.setTooltipText(ood_icon.as(gtk.Widget), translations._("Flagged out of date"));
+                a11y.setName(ood_icon.as(gtk.Widget), translations._("Flagged out of date"));
                 gtk.Box.append(title_box, ood_icon.as(gtk.Widget));
 
                 const installed_icon = gtk.Image.newFromIconName("object-select-symbolic");
                 gtk.Widget.setTooltipText(installed_icon.as(gtk.Widget), translations._("Installed"));
+                a11y.setName(installed_icon.as(gtk.Widget), translations._("Installed"));
                 gtk.Box.append(title_box, installed_icon.as(gtk.Widget));
 
                 const verified_icon = gtk.Image.newFromIconName("security-high-symbolic");
                 gtk.Widget.setTooltipText(verified_icon.as(gtk.Widget), translations._("Verified"));
+                a11y.setName(verified_icon.as(gtk.Widget), translations._("Verified"));
                 gtk.Box.append(title_box, verified_icon.as(gtk.Widget));
 
                 gtk.Box.append(box, title_box.as(gtk.Widget));
@@ -400,6 +405,7 @@ pub const ShellySearchPage = extern struct {
         const check = gobject.ext.cast(gtk.CheckButton, child) orelse return;
 
         page.priv().check_map.put(std.heap.c_allocator, pkg, check) catch {};
+        a11y.setName(check.as(gtk.Widget), pkg.getName());
         set_sync_active(check, pkg.isSelected());
     }
 
@@ -611,7 +617,7 @@ pub const ShellySearchPage = extern struct {
     ) void {
         const svc = runtime.config orelse return;
         svc.updateField(field, value) catch |err| {
-            std.log.err("Could not update setting {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(@tagName(field)), @import("diagnostics").cause(err), @errorName(err) });
+            std.log.err("Could not update setting {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(@tagName(field)), diagnostics.cause(err), @errorName(err) });
         };
     }
 
@@ -720,7 +726,7 @@ pub const ShellySearchPage = extern struct {
         switch (source) {
             .standard => {
                 const parsed = cli.search_standard(query) catch |err| {
-                    std.debug.print("Could not search standard repositories. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+                    std.debug.print("Could not search standard repositories. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
                     return;
                 };
                 var seen = std.StringHashMap(void).init(alloc);
@@ -740,7 +746,7 @@ pub const ShellySearchPage = extern struct {
             },
             .aur => {
                 const parsed = cli.search_aur(query) catch |err| {
-                    std.debug.print("Could not search the AUR. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+                    std.debug.print("Could not search the AUR. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
                     return;
                 };
                 for (parsed.value) |pkg| {
@@ -758,7 +764,7 @@ pub const ShellySearchPage = extern struct {
             },
             .flatpak => {
                 const parsed = cli.search_flatpak(query) catch |err| {
-                    std.debug.print("Could not search Flatpak remotes. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+                    std.debug.print("Could not search Flatpak remotes. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
                     return;
                 };
                 for (parsed.value.hits) |hit| {

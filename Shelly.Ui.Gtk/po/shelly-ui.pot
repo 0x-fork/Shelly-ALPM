@@ -5,7 +5,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Shelly-ALPM / Shelly: GTK\n"
 "Report-Msgid-Bugs-To: csnyder@seafoam-labs.org\n"
-"POT-Creation-Date: 2026-09-19 13:14-0400\n"
+"POT-Creation-Date: 2026-10-11 18:31-0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -57,7 +57,10 @@ msgstr ""
 msgid "Confirm"
 msgstr ""
 
-msgid "Skip"
+msgid "Permissions unavailable"
+msgstr ""
+
+msgid "Shelly could not read the permissions for this app."
 msgstr ""
 
 msgid "No special permissions requested"
@@ -94,6 +97,15 @@ msgid ""
 msgstr ""
 
 msgid "Review PKGBUILD"
+msgstr ""
+
+msgid "PKGBUILD"
+msgstr ""
+
+msgid "Retry"
+msgstr ""
+
+msgid "Skip"
 msgstr ""
 
 msgid "Search..."
@@ -176,13 +188,10 @@ msgstr ""
 msgid "Remove"
 msgstr ""
 
-msgid "Information"
-msgstr ""
-
-msgid "Preview Pkgbuild"
-msgstr ""
-
 msgid "Search the AUR by name or keyword"
+msgstr ""
+
+msgid "Search By"
 msgstr ""
 
 msgid "Installed Only"
@@ -191,10 +200,22 @@ msgstr ""
 msgid "Show only installed packages"
 msgstr ""
 
+msgid "Previous page"
+msgstr ""
+
+msgid "Page 1 of 1"
+msgstr ""
+
+msgid "Next page"
+msgstr ""
+
 msgid "Additional Options"
 msgstr ""
 
 msgid "Install Selected"
+msgstr ""
+
+msgid "Select"
 msgstr ""
 
 msgid "Name"
@@ -206,10 +227,10 @@ msgstr ""
 msgid "Popularity"
 msgstr ""
 
-msgid "Search the AUR"
+msgid "Loading the AUR index"
 msgstr ""
 
-msgid "The AUR has no browsable index. Type a package name to begin."
+msgid "Powered by Atoll."
 msgstr ""
 
 msgid "Run checks"
@@ -222,6 +243,18 @@ msgid "Hide Detail Pane"
 msgstr ""
 
 msgid "Hide the detail pane on the right"
+msgstr ""
+
+msgid "Information"
+msgstr ""
+
+msgid "Preview Pkgbuild"
+msgstr ""
+
+msgid "Search the AUR"
+msgstr ""
+
+msgid "The AUR has no browsable index. Type a package name to begin."
 msgstr ""
 
 msgid "Install a local Flatpak"
@@ -344,6 +377,9 @@ msgid "About"
 msgstr ""
 
 msgid "Shelly"
+msgstr ""
+
+msgid "Install Optional Deps"
 msgstr ""
 
 msgid "Reinstall"
@@ -582,6 +618,9 @@ msgstr ""
 msgid "Enable Shelly Search"
 msgstr ""
 
+msgid "Enable Atoll Powered AUR"
+msgstr ""
+
 msgid "AppImage Install Path"
 msgstr ""
 
@@ -754,19 +793,28 @@ msgstr ""
 msgid "Start Shelly"
 msgstr ""
 
-msgid "Filesystem"
+msgid "System files"
+msgstr ""
+
+msgid "Other folders"
+msgstr ""
+
+msgid "Running services"
+msgstr ""
+
+msgid "Other apps' data"
+msgstr ""
+
+msgid "Home folder"
+msgstr ""
+
+msgid "User folders"
+msgstr ""
+
+msgid "Persistent files"
 msgstr ""
 
 msgid "Devices"
-msgstr ""
-
-msgid "Sockets"
-msgstr ""
-
-msgid "Shared"
-msgstr ""
-
-msgid "Environment"
 msgstr ""
 
 msgid "Session bus"
@@ -775,7 +823,37 @@ msgstr ""
 msgid "System bus"
 msgstr ""
 
+msgid "Network access"
+msgstr ""
+
+msgid "Display server"
+msgstr ""
+
+msgid "Sandbox features"
+msgstr ""
+
+msgid "Environment"
+msgstr ""
+
+msgid "Sound"
+msgstr ""
+
+msgid "Printing"
+msgstr ""
+
+msgid "Inter-process communication"
+msgstr ""
+
 msgid "Other"
+msgstr ""
+
+msgid "No network access"
+msgstr ""
+
+msgid "No device access"
+msgstr ""
+
+msgid "No access to system files"
 msgstr ""
 
 msgid "Review PKGBUILD changes for"
@@ -820,7 +898,23 @@ msgstr ""
 msgid "net"
 msgstr ""
 
+msgid "Scanning PKGBUILD…"
+msgstr ""
+
+msgid "Security scan unavailable."
+msgstr ""
+
 msgid "Could not load the PKGBUILD preview."
+msgstr ""
+
+msgid ""
+"PKGBUILD changed. Close and reopen the preview to scan the current version."
+msgstr ""
+
+msgid "No related files."
+msgstr ""
+
+msgid "Previous"
 msgstr ""
 
 msgid "Dismiss"
@@ -917,6 +1011,60 @@ msgstr ""
 msgid "Discard"
 msgstr ""
 
+msgid "No packages found"
+msgstr ""
+
+msgid "Try a shorter or more general keyword."
+msgstr ""
+
+msgid "Could not reach Atoll"
+msgstr ""
+
+msgid "Check your connection and try again."
+msgstr ""
+
+msgid "Flagged out of date"
+msgstr ""
+
+msgid "Installed"
+msgstr ""
+
+msgid "Remove Selected"
+msgstr ""
+
+msgid "Select one or more packages"
+msgstr ""
+
+msgid "Package(s)"
+msgstr ""
+
+msgid "Page"
+msgstr ""
+
+msgid "of"
+msgstr ""
+
+msgid "Remove Packages"
+msgstr ""
+
+msgid "Remove the selected AUR packages?"
+msgstr ""
+
+msgid "Build from AUR"
+msgstr ""
+
+msgid "Build and install the selected packages? This may take a while."
+msgstr ""
+
+msgid "Build"
+msgstr ""
+
+msgid "Installing AUR packages"
+msgstr ""
+
+msgid "Removing AUR packages"
+msgstr ""
+
 msgid "Maintainer"
 msgstr ""
 
@@ -947,52 +1095,7 @@ msgstr ""
 msgid "The AUR has no browsable index — type a package name to begin."
 msgstr ""
 
-msgid "No packages found"
-msgstr ""
-
-msgid "Try a shorter or more general keyword."
-msgstr ""
-
 msgid "Could not search the configured AUR service."
-msgstr ""
-
-msgid "Check your connection and try again."
-msgstr ""
-
-msgid "Flagged out of date"
-msgstr ""
-
-msgid "Installed"
-msgstr ""
-
-msgid "Remove Selected"
-msgstr ""
-
-msgid "Select one or more packages"
-msgstr ""
-
-msgid "Package(s)"
-msgstr ""
-
-msgid "Remove Packages"
-msgstr ""
-
-msgid "Remove the selected AUR packages?"
-msgstr ""
-
-msgid "Build from AUR"
-msgstr ""
-
-msgid "Build and install the selected packages? This may take a while."
-msgstr ""
-
-msgid "Build"
-msgstr ""
-
-msgid "Installing AUR packages"
-msgstr ""
-
-msgid "Removing AUR packages"
 msgstr ""
 
 msgid "Choose a Flatpak file"
@@ -1235,6 +1338,12 @@ msgid "Making Package Explicit"
 msgstr ""
 
 msgid "Making Package Dependency"
+msgstr ""
+
+msgid "Select Optional Dependencies to Install"
+msgstr ""
+
+msgid "Installing optional dependencies"
 msgstr ""
 
 msgid "Package is already installed"
@@ -1548,9 +1657,6 @@ msgstr ""
 msgid "Update this package"
 msgstr ""
 
-msgid "of"
-msgstr ""
-
 msgid "updates included"
 msgstr ""
 
@@ -1589,7 +1695,16 @@ msgstr ""
 msgid "Installing Flatpak and AppImage support"
 msgstr ""
 
+msgid "Main menu"
+msgstr ""
+
 msgid "Settings"
+msgstr ""
+
+msgid "Expand sidebar"
+msgstr ""
+
+msgid "Collapse sidebar"
 msgstr ""
 
 msgid "Package"

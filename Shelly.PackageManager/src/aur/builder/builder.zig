@@ -2,6 +2,8 @@
 //! (review check, sources, lifecycle steps, package assembly) through the
 //! focused sibling modules and keeps the public builder API.
 const std = @import("std");
+const diagnostics = @import("diagnostics");
+const user_errors = @import("../../shared/user_errors.zig");
 const builtin = @import("builtin");
 pub const ShellyBuildConfiguration = @import("../shellybuild.zig").ShellyBuildConfiguration;
 const pkgbuild_parser = @import("../../pkgbuild/pkgbuild_parser.zig");
@@ -20,6 +22,7 @@ const srcinfo = @import("../srcinfo.zig");
 pub const pkgbuild_validation = @import("pkgbuild_validation.zig");
 pub const PkgbuildValidation = pkgbuild_validation.PkgbuildValidation;
 pub const pkgbuild_review = @import("pkgbuild_review.zig");
+pub const pkgver_update = @import("pkgver_update.zig");
 pub const PreparedPkgbuildReview = pkgbuild_review.PreparedPkgbuildReview;
 pub const preparePkgbuildReview = pkgbuild_review.preparePkgbuildReview;
 pub const sandbox = @import("sandbox.zig");
@@ -33,6 +36,7 @@ test {
     _ = @import("source_spec.zig");
     _ = @import("checksums.zig");
     _ = @import("metadata.zig");
+    _ = @import("pkgver_update.zig");
     _ = @import("security.zig");
     _ = @import("sandbox.zig");
     _ = @import("steps.zig");
@@ -160,6 +164,8 @@ pub const PackageBuilder = struct {
     /// number of selected split-package members. The inputs passed to init are
     /// borrowed, so only this replacement slice is released by deinit.
     evaluated_package_builds: ?[]PackageBuild = null,
+    /// Captured by the pkgver step; consumed after its borrowed plan returns.
+    pending_pkgver: ?[]u8 = null,
     /// Ownership requested by the currently executing package step. This is
     /// converted to archive metadata and cleared before the next split member.
     virtual_ownership_tracker: ?virtual_ownership.Tracker = null,
@@ -196,6 +202,7 @@ pub const PackageBuilder = struct {
 
     pub fn deinit(self: *PackageBuilder) void {
         self.clearVirtualOwnership();
+        if (self.pending_pkgver) |version| self.allocator.free(version);
         if (self.evaluated_package_builds) |builds| {
             for (builds) |*package_build| package_build.deinit(self.allocator);
             self.allocator.free(builds);
@@ -220,7 +227,7 @@ pub const PackageBuilder = struct {
         var bad_path: ?[]const u8 = null;
         const path = build_path.resolve(self.allocator, self.io, self.shellybuild_config.build.extra_path, &bad_path) catch |err| {
             if (bad_path) |invalid| {
-                const message = try std.fmt.allocPrint(self.allocator, "Cannot use build.extra_path directory '{0f}': {1s} Configure an absolute directory searchable by the build user.\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(invalid), @import("diagnostics").cause(err), @errorName(err) });
+                const message = try std.fmt.allocPrint(self.allocator, "Cannot use build.extra_path directory '{0f}': {1s} Configure an absolute directory searchable by the build user.\n\nTechnical details: {2s}", .{ diagnostics.safe(invalid), diagnostics.cause(err), @errorName(err) });
                 defer self.allocator.free(message);
                 operation.reportError(err, message, "build configuration", null, false);
             }
@@ -233,7 +240,7 @@ pub const PackageBuilder = struct {
             const config = @import("../shellybuild.zig");
             config.validateEnvironmentAssignment(assignment) catch |err| {
                 const message = try std.fmt.allocPrint(self.allocator, "Invalid build.env variable '{f}': {s}.", .{
-                    @import("diagnostics").safe(assignment.name), config.environmentErrorReason(err),
+                    diagnostics.safe(assignment.name), config.environmentErrorReason(err),
                 });
                 defer self.allocator.free(message);
                 operation.reportError(err, message, "build configuration", null, false);
@@ -285,7 +292,7 @@ pub const PackageBuilder = struct {
                 return err;
             }
             if (err != error.StepFailed) {
-                const message = try @import("../../shared/user_errors.zig").format(self.allocator, err, .{
+                const message = try user_errors.format(self.allocator, err, .{
                     .operation = "the package build",
                     .subject = if (self.requested_names.len > 0) self.requested_names[0] else null,
                 });
@@ -303,6 +310,7 @@ pub const PackageBuilder = struct {
         self: *PackageBuilder,
         operation: *op_context.Operation,
     ) ![]BuildArtifact {
+        try @import("archive").validateCompression(self.shellybuild_config.package.extension, self.shellybuild_config.package.compression_level);
         const reviewed_digest = self.options.reviewed_pkgbuild_digest orelse
             return error.UnreviewedBuilderRequest;
         if (self.options.pkgbuild_path) |pkgbuild_path| {
@@ -340,6 +348,14 @@ pub const PackageBuilder = struct {
         self.active_log = &log;
         defer self.active_log = null;
         try log.writeRecord("build", "started");
+        if (self.shellybuild_config.package.compression_level) |preset| {
+            const format = try @import("archive").compression_policy.Format.fromPath(self.shellybuild_config.package.extension);
+            const message = try std.fmt.allocPrint(self.allocator, "preset {d} ({s}), {s} level {s}", .{
+                @intFromEnum(preset), @tagName(preset), format.filterName(), preset.backendLevel(format),
+            });
+            defer self.allocator.free(message);
+            try log.writeRecord("compression", message);
+        }
         const artifacts = self.buildPackage(operation) catch |err| {
             const location = self.failure_location;
             const detail = std.fmt.allocPrint(self.allocator, "{s}: {s}: {s}", .{
@@ -398,8 +414,8 @@ pub const PackageBuilder = struct {
     }
 
     /// Resolves reviewed top-level PKGBUILD metadata in the normal lifecycle
-    /// sandbox and writes SRCINFO without acquiring sources or invoking
-    /// verify(), prepare(), pkgver(), build(), check(), or package().
+    /// sandbox. When pkgver() exists, prepares sources and updates the version
+    /// before writing SRCINFO. Never invokes build(), check(), or package().
     pub fn writeSrcinfoWithOperation(
         self: *PackageBuilder,
         operation: *op_context.Operation,
@@ -472,13 +488,44 @@ pub const PackageBuilder = struct {
             self.options.start_directory,
         );
         try self.validatePackageFunctions();
+        const original_install_scripts = self.options.install_scripts;
+        const original_reviewed_files = self.options.reviewed_files;
+        defer {
+            self.options.install_scripts = original_install_scripts;
+            self.options.reviewed_files = original_reviewed_files;
+        }
+        self.options.install_scripts = resolved_review.install_scripts;
+        self.options.reviewed_files = resolved_review.reviewed_files;
+        if (self.hasSharedPhase("pkgver")) {
+            try steps.validateBuildDirectories(self);
+            try self.prepareVersion(operation, &resolved_review, true);
+            // Source the updated file again for SRCINFO's scalar/array overrides.
+            // Never reuse the snapshot taken before pkgver() ran.
+            const refreshed = try self.resolveEvaluatedBuilds(operation);
+            evaluated.deinit(self.allocator);
+            evaluated = refreshed;
+        }
+        try resolved_review.verifyCurrent(self.allocator, self.io, pkgbuild_path, self.options.start_directory);
+        const final_pkgbuild = try std.Io.Dir.cwd().readFileAlloc(
+            self.io,
+            pkgbuild_path,
+            self.allocator,
+            .limited(32 * 1024 * 1024),
+        );
+        defer self.allocator.free(final_pkgbuild);
+        var final_review = try preparePkgbuildReview(self.allocator, self.io, self.options.start_directory, final_pkgbuild, self.package_builds);
+        defer final_review.deinit();
+        if (!std.mem.eql(u8, &resolved_review.digest, &final_review.digest))
+            return error.ReviewedPkgbuildChanged;
+        try self.validatePackageFunctions();
         try srcinfo.writePkgbuild(
             self.allocator,
             self.io,
             writer,
-            current_pkgbuild,
+            final_pkgbuild,
             .{
                 .package_carch = self.shellybuild_config.build.carch,
+                .dynamic_functions = &evaluated.functions,
                 .dynamic_overrides = if (evaluated.scalars.count() > 0) &evaluated.scalars else null,
                 .dynamic_unsets = if (evaluated.unset_scalars.count() > 0) &evaluated.unset_scalars else null,
                 .dynamic_array_overrides = &evaluated.arrays,
@@ -493,7 +540,7 @@ pub const PackageBuilder = struct {
         try self.requireSandboxAvailability();
         var resolved_review: ?PreparedPkgbuildReview = null;
         defer if (resolved_review) |*review| review.deinit();
-        const original_review_digest = self.options.reviewed_pkgbuild_digest;
+        var original_review_digest = self.options.reviewed_pkgbuild_digest;
         const original_install_scripts = self.options.install_scripts;
         const original_reviewed_files = self.options.reviewed_files;
         defer {
@@ -558,21 +605,10 @@ pub const PackageBuilder = struct {
             self.options.reviewed_files = review.reviewed_files;
         }
         try self.validatePackageFunctions();
-        if (!self.options.sources_prepared) try sources.prepareSources(self, operation);
-        if (self.package_builds[0].execution) |shared_execution| for (shared_execution.steps) |step| {
-            if (steps.isPackageStep(step.name)) continue;
-            if (std.mem.eql(u8, step.name, "check") and !self.options.run_check) continue;
-            try steps.runStep(
-                self,
-                operation,
-                self.requested_names[0],
-                step.name,
-                shared_execution.shared_prelude,
-                shared_execution.shared_helpers,
-                step.body,
-                null,
-            );
-        };
+        try self.prepareVersion(operation, if (resolved_review) |*review| review else null, false);
+        original_review_digest = self.options.reviewed_pkgbuild_digest;
+        try self.runSharedPhase(operation, "build");
+        if (self.options.run_check) try self.runSharedPhase(operation, "check");
 
         var artifacts: std.ArrayList(BuildArtifact) = .empty;
         errdefer {
@@ -652,8 +688,83 @@ pub const PackageBuilder = struct {
         return artifacts.toOwnedSlice(self.allocator);
     }
 
+    fn hasSharedPhase(self: *const PackageBuilder, phase: []const u8) bool {
+        const execution = self.package_builds[0].execution orelse return false;
+        for (execution.steps) |step| {
+            if (std.mem.eql(u8, step.name, phase)) return true;
+        }
+        return false;
+    }
+
+    fn runSharedPhase(self: *PackageBuilder, operation: *op_context.Operation, phase: []const u8) !void {
+        const execution = self.package_builds[0].execution orelse return;
+        const step = for (execution.steps) |candidate| {
+            if (std.mem.eql(u8, candidate.name, phase)) break candidate;
+        } else return;
+        try steps.runStep(self, operation, self.requested_names[0], step.name, execution.shared_prelude, execution.shared_helpers, step.body, null);
+    }
+
+    /// Shared source/prepare/pkgver lifecycle. No execution-plan pointers may
+    /// survive finishPkgver, which can replace all evaluated package members.
+    fn prepareVersion(
+        self: *PackageBuilder,
+        operation: *op_context.Operation,
+        review: ?*PreparedPkgbuildReview,
+        require_writeback: bool,
+    ) !void {
+        if (!self.options.sources_prepared) try sources.prepareSources(self, operation);
+        try self.runSharedPhase(operation, "prepare");
+        try self.runSharedPhase(operation, "pkgver");
+        if (self.pending_pkgver != null)
+            try self.finishPkgver(operation, review orelse return error.UnreviewedBuilderRequest, require_writeback);
+    }
+
+    fn finishPkgver(self: *PackageBuilder, operation: *op_context.Operation, review: *PreparedPkgbuildReview, require_writeback: bool) !void {
+        const version = self.pending_pkgver.?;
+        self.pending_pkgver = null;
+        defer self.allocator.free(version);
+        if (std.mem.eql(u8, version, self.package_builds[0].pkg_version orelse "")) return;
+        const path = self.options.pkgbuild_path.?;
+        try review.verifyCurrent(self.allocator, self.io, path, self.options.start_directory);
+        const original = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(32 * 1024 * 1024));
+        defer self.allocator.free(original);
+        var original_digest: pkgbuild_review.Digest = undefined;
+        std.crypto.hash.sha2.Sha256.hash(original, &original_digest, .{});
+        if (!std.mem.eql(u8, &original_digest, &review.pkgbuild_digest)) return error.ReviewedPkgbuildChanged;
+        const updated = try pkgver_update.render(self.allocator, original, version);
+        defer self.allocator.free(updated);
+        if (!try pkgver_update.write(self.allocator, self.io, path, original, updated)) {
+            if (require_writeback) return error.PkgbuildNotWritable;
+            operation.status(.warning, "PKGBUILD is not writable; keeping the original package version and release", "build.pkgver", null);
+            return;
+        }
+        const updated_digest = pkgbuild_review.digestPreparedReview(updated, review.reviewed_files);
+        // Only the controlled edit is approved. Newly discovered inputs or
+        // any other modification must still pass the normal review boundary.
+        self.options.reviewed_pkgbuild_digest = updated_digest;
+        var updated_pkgbuild_digest: pkgbuild_review.Digest = undefined;
+        std.crypto.hash.sha2.Sha256.hash(updated, &updated_pkgbuild_digest, .{});
+        self.options.pkgbuild_sha256sum = updated_pkgbuild_digest;
+        self.failure_location = .{};
+        var evaluated = try self.resolveEvaluatedBuilds(operation);
+        defer evaluated.deinit(self.allocator);
+        self.failure_location = .{};
+        var refreshed = try preparePkgbuildReview(self.allocator, self.io, self.options.start_directory, updated, self.package_builds);
+        errdefer refreshed.deinit();
+        if (!std.mem.eql(u8, &updated_digest, &refreshed.digest)) return error.ReviewedPkgbuildChanged;
+        try refreshed.verifyCurrent(self.allocator, self.io, path, self.options.start_directory);
+        try self.validatePackageFunctions();
+        const message = try std.fmt.allocPrint(self.allocator, "Updated version: {s}-{s}", .{ self.package_builds[0].pkg_version orelse "", self.package_builds[0].pkg_rel orelse "" });
+        defer self.allocator.free(message);
+        review.deinit();
+        review.* = refreshed;
+        self.options.install_scripts = review.install_scripts;
+        self.options.reviewed_files = review.reviewed_files;
+        operation.status(.information, message, "build.pkgver", null);
+    }
+
     /// Sources the reviewed PKGBUILD in the sandbox and reparses it with the
-    /// resulting scalar and indexed-array state. This makes
+    /// resulting scalar, indexed-array, and function state. This makes
     /// source acquisition and lifecycle steps share one coherent top-level
     /// shell state. Replaces `package_builds` contents in place.
     fn resolveEvaluatedBuilds(
@@ -669,6 +780,7 @@ pub const PackageBuilder = struct {
             if (evaluated.unset_arrays.count() > 0) &evaluated.unset_arrays else null,
         );
         try self.reparseEvaluatedBuilds(
+            &evaluated.functions,
             if (evaluated.scalars.count() > 0) &evaluated.scalars else null,
             if (evaluated.unset_scalars.count() > 0) &evaluated.unset_scalars else null,
             &evaluated.arrays,
@@ -803,6 +915,7 @@ pub const PackageBuilder = struct {
 
     fn reparseEvaluatedBuilds(
         self: *PackageBuilder,
+        functions: *const std.StringHashMap([]const u8),
         overrides: ?*const std.StringHashMap([]const u8),
         unset_overrides: ?*const steps.DynamicScalarUnsets,
         array_overrides: ?*const steps.DynamicArrayOverrides,
@@ -825,6 +938,7 @@ pub const PackageBuilder = struct {
                     .io = self.io,
                     .selected_package_name = requested_name,
                     .package_carch = self.shellybuild_config.build.carch,
+                    .dynamic_functions = functions,
                     .dynamic_overrides = overrides,
                     .dynamic_unsets = unset_overrides,
                     .dynamic_array_overrides = array_overrides,
@@ -849,6 +963,7 @@ pub const PackageBuilder = struct {
                 .io = self.io,
                 .selected_package_name = requested_name,
                 .package_carch = self.shellybuild_config.build.carch,
+                .dynamic_functions = functions,
                 .dynamic_overrides = overrides,
                 .dynamic_unsets = unset_overrides,
                 .dynamic_array_overrides = array_overrides,

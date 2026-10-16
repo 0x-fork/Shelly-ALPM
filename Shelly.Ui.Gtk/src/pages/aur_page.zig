@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const bindings = @import("Shelly_Ui_Gtk");
 const gtk = bindings.gtk;
 const gio = bindings.gio;
@@ -14,6 +15,7 @@ const runtime = @import("../services/runtime.zig");
 const ShellyConfig = @import("../models/shelly_config.zig").ShellyConfig;
 const AurPackageDetail = @import("aur_package_detail.zig").PackageDetail;
 const translations = @import("../helpers/translations.zig");
+const a11y = @import("../helpers/a11y.zig");
 const sorters = @import("../helpers/sorters.zig");
 
 pub const AurPage = extern struct {
@@ -313,10 +315,12 @@ pub const AurPage = extern struct {
 
                 const ood_icon = gtk.Image.newFromIconName("dialog-warning-symbolic");
                 gtk.Widget.setTooltipText(ood_icon.as(gtk.Widget), translations._("Flagged out of date"));
+                a11y.setName(ood_icon.as(gtk.Widget), translations._("Flagged out of date"));
                 gtk.Box.append(title_box, ood_icon.as(gtk.Widget));
 
                 const installed_icon = gtk.Image.newFromIconName("object-select-symbolic");
                 gtk.Widget.setTooltipText(installed_icon.as(gtk.Widget), translations._("Installed"));
+                a11y.setName(installed_icon.as(gtk.Widget), translations._("Installed"));
                 gtk.Box.append(title_box, installed_icon.as(gtk.Widget));
 
                 gtk.Box.append(box, title_box.as(gtk.Widget));
@@ -381,6 +385,7 @@ pub const AurPage = extern struct {
         const check = gobject.ext.cast(gtk.CheckButton, child) orelse return;
 
         page.priv().check_map.put(std.heap.c_allocator, pkg, check) catch {};
+        a11y.setName(check.as(gtk.Widget), pkg.getName());
         set_sync_active(check, pkg.isSelected());
     }
 
@@ -541,7 +546,7 @@ pub const AurPage = extern struct {
     ) void {
         const svc = runtime.config orelse return;
         svc.updateField(field, value) catch |err| {
-            std.log.err("Could not update setting {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(@tagName(field)), @import("diagnostics").cause(err), @errorName(err) });
+            std.log.err("Could not update setting {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(@tagName(field)), diagnostics.cause(err), @errorName(err) });
         };
     }
 
@@ -596,13 +601,13 @@ pub const AurPage = extern struct {
                     return;
                 };
                 break :blk cli.search_aur(query) catch |err| {
-                    std.debug.print("Could not search the AUR. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+                    std.debug.print("Could not search the AUR. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
                     post_failure(page, arena_ptr, generation);
                     return;
                 };
             },
             .installed => cli.list_aur_installed() catch |err| {
-                std.debug.print("Could not load the installed AUR-package list. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+                std.debug.print("Could not load the installed AUR-package list. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
                 post_failure(page, arena_ptr, generation);
                 return;
             },

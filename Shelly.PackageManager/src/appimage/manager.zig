@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const builtin = @import("builtin");
 const appimage = @import("bindings.zig").appimage;
 const launch_environment = @import("environment.zig");
@@ -125,7 +126,7 @@ pub const AppImageManager = struct {
         std.Io.Dir.rename(.cwd(), staging_path, .cwd(), dest_path, self.io) catch |err| return err;
 
         var integration = self.beginDesktopIntegration(metadata, dest_path, content.source_desktop_path, content.icon_source) catch |err| {
-            self.emitStatusFmt(.err, "Could not write desktop integration for {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(app_name), @import("diagnostics").cause(err), @errorName(err) });
+            self.emitStatusFmt(.err, "Could not write desktop integration for {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(app_name), diagnostics.cause(err), @errorName(err) });
             self.rollbackInstalledBinary(dest_path, backup_path, had_existing);
             operation_scope.finish(.failed);
             return false;
@@ -133,8 +134,8 @@ pub const AppImageManager = struct {
         defer integration.deinit();
 
         self.addAppImageToLocalDb(metadata) catch |err| {
-            self.emitStatusFmt(.err, "Could not install {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(app_name), @import("diagnostics").cause(err), @errorName(err) });
-            integration.rollback() catch |rollback_err| self.emitStatusFmt(.err, "Could not restore desktop integration for the requested package after the operation failed. {0s} Desktop entries or icons may need repair.\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(rollback_err), @errorName(rollback_err) });
+            self.emitStatusFmt(.err, "Could not install {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(app_name), diagnostics.cause(err), @errorName(err) });
+            integration.rollback() catch |rollback_err| self.emitStatusFmt(.err, "Could not restore desktop integration for the requested package after the operation failed. {0s} Desktop entries or icons may need repair.\n\nTechnical details: {1s}", .{ diagnostics.cause(rollback_err), @errorName(rollback_err) });
             self.rollbackInstalledBinary(dest_path, backup_path, had_existing);
             operation_scope.finish(.failed);
             return false;
@@ -151,7 +152,7 @@ pub const AppImageManager = struct {
                 std.Io.Dir.cwd().deleteFile(self.io, existing.path) catch {};
         }
         if (had_existing) std.Io.Dir.cwd().deleteFile(self.io, backup_path) catch |err| {
-            self.emitStatusFmt(.warning, "Could not remove the backup for the requested package at the backup path. {0s} The backup remains on disk.\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+            self.emitStatusFmt(.warning, "Could not remove the backup for the requested package at the backup path. {0s} The backup remains on disk.\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
         };
         self.refreshDesktopCachesBestEffort(content.icon_source != null);
 
@@ -163,7 +164,7 @@ pub const AppImageManager = struct {
     fn rollbackInstalledBinary(self: AppImageManager, dest_path: []const u8, backup_path: []const u8, had_existing: bool) void {
         if (had_existing) {
             std.Io.Dir.rename(.cwd(), backup_path, .cwd(), dest_path, self.io) catch |err| {
-                self.emitStatusFmt(.err, "Could not restore the previous AppImage for the requested package from the backup path. {0s} Check the installed file and backup before launching or retrying the update.\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+                self.emitStatusFmt(.err, "Could not restore the previous AppImage for the requested package from the backup path. {0s} Check the installed file and backup before launching or retrying the update.\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
             };
         } else {
             std.Io.Dir.cwd().deleteFile(self.io, dest_path) catch {};
@@ -200,6 +201,8 @@ pub const AppImageManager = struct {
             try writer.interface.writeAll(read_buf[0..n]);
         }
         try writer.interface.flush();
+        // Preserve executable permissions before atomic replacement or rollback.
+        try dst.setPermissions(self.io, (try src.stat(self.io)).permissions);
         try dst.sync(self.io);
         operation_scope.finish(.success);
     }
@@ -263,7 +266,7 @@ pub const AppImageManager = struct {
 
         const term = try extract_proc.wait(self.io);
         if (term != .exited or term.exited != 0) {
-            std.log.warn("Could not extract metadata from AppImage {0f}.", .{@import("diagnostics").safe(path)});
+            std.log.warn("Could not extract metadata from AppImage {0f}.", .{diagnostics.safe(path)});
             operation_scope.finish(.failed);
             freeWorkingDir(self.allocator, self.io, &working_dir);
             return null;
@@ -575,7 +578,7 @@ pub const AppImageManager = struct {
         const theme_dir = std.fs.path.join(self.allocator, &.{ data_home, "icons/hicolor" }) catch |err| {
             self.emitCacheWarningFmt(
                 "Could not prepare the icon cache refresh. {0s} Installed icons may not appear in menus until the icon cache is rebuilt.\n\nTechnical details: {1s}",
-                .{ @import("diagnostics").cause(err), @errorName(err) },
+                .{ diagnostics.cause(err), @errorName(err) },
             );
             return;
         };
@@ -590,7 +593,7 @@ pub const AppImageManager = struct {
 
     pub fn refreshDesktopCachesBestEffort(self: AppImageManager, refresh_icons: bool) void {
         const data_home = xdg_paths.xdgDataHome(self.allocator, self.environ) catch |err| {
-            self.emitCacheWarningFmt("Could not resolve the user data directory for cache refreshes. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+            self.emitCacheWarningFmt("Could not resolve the user data directory for cache refreshes. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
             return;
         };
         defer self.allocator.free(data_home);
@@ -598,7 +601,7 @@ pub const AppImageManager = struct {
         const desktop_dir = std.fs.path.join(self.allocator, &.{ data_home, "applications" }) catch |err| {
             self.emitCacheWarningFmt(
                 "Could not prepare the desktop database refresh. {0s} Application menu entries may not update until the desktop database is rebuilt.\n\nTechnical details: {1s}",
-                .{ @import("diagnostics").cause(err), @errorName(err) },
+                .{ diagnostics.cause(err), @errorName(err) },
             );
             if (refresh_icons) self.updateIconCache(data_home);
             return;
@@ -619,17 +622,17 @@ pub const AppImageManager = struct {
             if (err == error.StreamTooLong) {
                 self.emitCacheWarningFmt(
                     "Could not refresh {0f} because {1f} produced more than {2d} bytes of output. {3f}",
-                    .{ @import("diagnostics").safe(target_path), @import("diagnostics").safe(tool_name), max_cache_command_output, @import("diagnostics").safe(consequence) },
+                    .{ diagnostics.safe(target_path), diagnostics.safe(tool_name), max_cache_command_output, diagnostics.safe(consequence) },
                 );
             } else if (err == error.FileNotFound) {
                 self.emitCacheWarningFmt(
                     "Could not refresh {0f} because cache utility {1f} is unavailable. {2f}",
-                    .{ @import("diagnostics").safe(target_path), @import("diagnostics").safe(tool_name), @import("diagnostics").safe(consequence) },
+                    .{ diagnostics.safe(target_path), diagnostics.safe(tool_name), diagnostics.safe(consequence) },
                 );
             } else {
                 self.emitCacheWarningFmt(
                     "Could not run {0f} to refresh {1f}. {2s} {3f}\n\nTechnical details: {4s}",
-                    .{ @import("diagnostics").safe(tool_name), @import("diagnostics").safe(target_path), @import("diagnostics").cause(err), @import("diagnostics").safe(consequence), @errorName(err) },
+                    .{ diagnostics.safe(tool_name), diagnostics.safe(target_path), diagnostics.cause(err), diagnostics.safe(consequence), @errorName(err) },
                 );
             }
             return;
@@ -657,12 +660,12 @@ pub const AppImageManager = struct {
         if (diagnostic.len > 0) {
             self.emitCacheWarningFmt(
                 "Could not refresh {0f}: {1f} {2f}. {3f}\n\nTechnical details: {4f}",
-                .{ @import("diagnostics").safe(target_path), @import("diagnostics").safe(tool_name), @import("diagnostics").safe(term_description), @import("diagnostics").safe(consequence), @import("diagnostics").safe(diagnostic) },
+                .{ diagnostics.safe(target_path), diagnostics.safe(tool_name), diagnostics.safe(term_description), diagnostics.safe(consequence), diagnostics.safe(diagnostic) },
             );
         } else {
             self.emitCacheWarningFmt(
                 "Could not refresh {0f}: {1f} {2f}. {3f}",
-                .{ @import("diagnostics").safe(target_path), @import("diagnostics").safe(tool_name), @import("diagnostics").safe(term_description), @import("diagnostics").safe(consequence) },
+                .{ diagnostics.safe(target_path), diagnostics.safe(tool_name), diagnostics.safe(term_description), diagnostics.safe(consequence) },
             );
         }
     }
@@ -727,10 +730,10 @@ pub const AppImageManager = struct {
         pub fn finish(self: *DesktopIntegration) !void {
             if (!self.active) return;
             if (self.desktop_backup) |backup| std.Io.Dir.cwd().deleteFile(self.manager.io, backup) catch |err| {
-                std.log.warn("Could not remove the desktop integration backup at {0f}. {1s} The backup remains on disk.\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(backup), @import("diagnostics").cause(err), @errorName(err) });
+                std.log.warn("Could not remove the desktop integration backup at {0f}. {1s} The backup remains on disk.\n\nTechnical details: {2s}", .{ diagnostics.safe(backup), diagnostics.cause(err), @errorName(err) });
             };
             if (self.icon_backup) |backup| std.Io.Dir.cwd().deleteFile(self.manager.io, backup) catch |err| {
-                std.log.warn("Could not remove the desktop integration backup at {0f}. {1s} The backup remains on disk.\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(backup), @import("diagnostics").cause(err), @errorName(err) });
+                std.log.warn("Could not remove the desktop integration backup at {0f}. {1s} The backup remains on disk.\n\nTechnical details: {2s}", .{ diagnostics.safe(backup), diagnostics.cause(err), @errorName(err) });
             };
             self.active = false;
         }
@@ -746,15 +749,26 @@ pub const AppImageManager = struct {
         const clean_name = try self.cleanInvalidNames(metadata.name);
         defer self.allocator.free(clean_name);
         const desktop_path = try self.installedDesktopPath(clean_name);
-        var integration = DesktopIntegration{ .manager = self, .desktop_path = desktop_path };
-        errdefer integration.deinit();
+        var integration = DesktopIntegration{ .manager = self, .desktop_path = desktop_path, .active = false };
+        errdefer {
+            // Until every snapshot succeeds, no original artifact was changed.
+            // Discard backups rather than rolling back an incomplete snapshot.
+            if (!integration.active) {
+                integration.active = true;
+                integration.finish() catch {};
+            }
+            integration.deinit();
+        }
         integration.desktop_backup = try integration.snapshot(desktop_path, "desktop-backup");
 
         if (icon_source) |source| {
             const icon_path = try self.iconDestinationPath(source, metadata.icon_name);
             integration.icon_path = icon_path;
             integration.icon_backup = try integration.snapshot(icon_path, "icon-backup");
-            try self.writeFileAtomically(source.path, icon_path, "icon-stage");
+        }
+        integration.active = true;
+        if (icon_source) |source| {
+            try self.writeFileAtomically(source.path, integration.icon_path.?, "icon-stage");
         }
         try self.writeDesktopEntry(clean_name, final_exec_path, source_desktop_path, metadata);
 
@@ -965,7 +979,7 @@ pub const AppImageManager = struct {
         const parsed = std.json.parseFromSlice([]appimage.AppImage, self.allocator, contents, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
-            std.log.warn("Could not read the local AppImage database. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+            std.log.warn("Could not read the local AppImage database. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
             return &.{};
         };
         defer parsed.deinit();
@@ -1227,7 +1241,7 @@ pub const AppImageManager = struct {
 
     fn removeStaleAppImageEntry(self: AppImageManager, app_name: []const u8, appimage_path: []const u8) void {
         self.removeAppImageFromLocalDb(app_name) catch |err| {
-            std.log.warn("Could not remove stale AppImage metadata for {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(app_name), @import("diagnostics").cause(err), @errorName(err) });
+            std.log.warn("Could not remove stale AppImage metadata for {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(app_name), diagnostics.cause(err), @errorName(err) });
             return;
         };
         self.emitStatusFmt(.warning, "AppImage file for {s} not found; removed stale metadata entry.", .{app_name});
@@ -1282,40 +1296,61 @@ pub const AppImageManager = struct {
             };
             defer self.allocator.free(appimage_path);
 
-            const file_at_install = (std.Io.Dir.cwd().statFile(self.io, appimage_path, .{}) catch null) != null;
-
-            if (!file_at_install) {
-                const moved = blk: {
-                    if (existing) |ex| {
-                        if (ex.path.len == 0) break :blk false;
-                        const old_exists = (std.Io.Dir.cwd().statFile(self.io, ex.path, .{}) catch null) != null;
-                        if (!old_exists) break :blk false;
-                        std.log.info("Moving AppImage from {s} to {s}", .{ ex.path, appimage_path });
-                        if (std.Io.Dir.cwd().createDirPathOpen(self.io, self.install_directory, .{})) |dir_handle| {
-                            dir_handle.close(self.io);
-                        } else |_| {}
-                        self.copyFile(ex.path, appimage_path) catch |err| {
-                            std.log.err("Could not move the selected AppImage from the source path to the destination path. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
-                            break :blk false;
-                        };
-                        std.Io.Dir.cwd().deleteFile(self.io, ex.path) catch {};
-                        break :blk true;
-                    }
-                    break :blk false;
+            // Only a missing file is stale. Permission and I/O errors must leave
+            // the existing database entry and desktop integration untouched.
+            const installed_stat = std.Io.Dir.cwd().statFile(self.io, appimage_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => null,
+                else => return err,
+            };
+            var staging_path: ?[]u8 = null;
+            defer if (staging_path) |path| {
+                std.Io.Dir.cwd().deleteFile(self.io, path) catch {};
+                self.allocator.free(path);
+            };
+            var original_path: ?[]const u8 = null;
+            var published = false;
+            var committed = false;
+            defer if (published and !committed) {
+                std.Io.Dir.cwd().deleteFile(self.io, appimage_path) catch |err| {
+                    std.log.warn("Could not remove the uncommitted AppImage at {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(appimage_path), diagnostics.cause(err), @errorName(err) });
                 };
-                if (!moved) {
+            };
+
+            if (installed_stat == null) {
+                if (existing) |ex| {
+                    if (ex.path.len > 0) {
+                        const old_stat = std.Io.Dir.cwd().statFile(self.io, ex.path, .{}) catch |err| switch (err) {
+                            error.FileNotFound => null,
+                            else => return err,
+                        };
+                        if (old_stat != null) original_path = ex.path;
+                    }
+                }
+                if (original_path) |path| {
+                    std.log.info("Moving AppImage from {s} to {s}", .{ path, appimage_path });
+                    var directory = try std.Io.Dir.cwd().createDirPathOpen(self.io, self.install_directory, .{});
+                    directory.close(self.io);
+                    staging_path = try self.uniqueSiblingPath(appimage_path, "sync");
+                    try self.copyFile(path, staging_path.?);
+                    try self.setExecutable(staging_path.?);
+                } else {
                     if (existing != null) {
                         self.removeStaleAppImageEntry(app_name, appimage_path);
                         continue;
                     }
-                    std.log.warn("Could not find the selected AppImage at {0f}. Check its location and synchronize the AppImage list again.", .{@import("diagnostics").safe(appimage_path)});
+                    std.log.warn("Could not find the selected AppImage at {0f}. Check its location and synchronize the AppImage list again.", .{diagnostics.safe(appimage_path)});
                     success = false;
                     continue;
                 }
+            } else if (installed_stat.?.permissions.toMode() & 0o111 == 0) {
+                // Recover copies left non-executable by older versions of sync.
+                try self.setExecutable(appimage_path);
             }
 
-            var content = (try self.extractMetadataPure(appimage_path, null, null)) orelse {
-                std.log.err("Could not extract metadata for AppImage {0f}.", .{@import("diagnostics").safe(app_name)});
+            // The staged filename is temporary; metadata must describe the final
+            // installation. Keep the original binary until all writes commit.
+            var content = (try self.extractMetadataPure(staging_path orelse appimage_path, app_name, appimage_path)) orelse {
+                std.log.warn("Could not extract metadata for AppImage {0f}.", .{diagnostics.safe(app_name)});
                 success = false;
                 continue;
             };
@@ -1328,24 +1363,41 @@ pub const AppImageManager = struct {
                 updated.update_type = .static_url;
             }
 
+            updated.path = appimage_path;
+
+            if (staging_path) |path| {
+                try self.checkCancelled();
+                // Do not overwrite a file that appeared while we were extracting.
+                try std.Io.Dir.renamePreserve(.cwd(), path, .cwd(), appimage_path, self.io);
+                published = true;
+            }
+
             var integration = self.beginDesktopIntegration(updated, appimage_path, content.source_desktop_path, content.icon_source) catch |err| {
-                std.log.warn("Could not apply desktop integration for {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(app_name), @import("diagnostics").cause(err), @errorName(err) });
+                std.log.warn("Could not apply desktop integration for {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(app_name), diagnostics.cause(err), @errorName(err) });
                 success = false;
                 continue;
             };
             defer integration.deinit();
 
             self.addAppImageToLocalDb(updated) catch |err| {
-                std.log.warn("Could not persist metadata for {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(app_name), @import("diagnostics").cause(err), @errorName(err) });
-                integration.rollback() catch |rollback_err| std.log.err("Could not restore desktop integration for the requested package after the operation failed. {0s} Desktop entries or icons may need repair.\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(rollback_err), @errorName(rollback_err) });
+                std.log.warn("Could not persist metadata for {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(app_name), diagnostics.cause(err), @errorName(err) });
+                integration.rollback() catch |rollback_err| std.log.err("Could not restore desktop integration for the requested package after the operation failed. {0s} Desktop entries or icons may need repair.\n\nTechnical details: {1s}", .{ diagnostics.cause(rollback_err), @errorName(rollback_err) });
                 success = false;
                 continue;
             };
+            // The database now points to the published binary. Cleanup failures
+            // must not roll it back or leave the database pointing at a missing file.
+            committed = true;
             integration.finish() catch |err| {
-                std.log.warn("Could not finalize desktop integration for {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(app_name), @import("diagnostics").cause(err), @errorName(err) });
+                std.log.warn("Could not finalize desktop integration for {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(app_name), diagnostics.cause(err), @errorName(err) });
                 success = false;
                 continue;
             };
+            if (original_path) |path| {
+                std.Io.Dir.cwd().deleteFile(self.io, path) catch |err| {
+                    std.log.warn("Could not remove the previous AppImage at {0f}. {1s} The new installation is ready, but the old copy remains on disk.\n\nTechnical details: {2s}", .{ diagnostics.safe(path), diagnostics.cause(err), @errorName(err) });
+                };
+            }
             self.refreshDesktopCachesBestEffort(content.icon_source != null);
         }
 
@@ -1423,7 +1475,7 @@ pub const AppImageManager = struct {
             }
 
             std.Io.Dir.cwd().deleteFile(self.io, df_path) catch |err| {
-                std.log.warn("Could not remove desktop entry {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(df_path), @import("diagnostics").cause(err), @errorName(err) });
+                std.log.warn("Could not remove desktop entry {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(df_path), diagnostics.cause(err), @errorName(err) });
             };
         }
 
@@ -1458,7 +1510,7 @@ pub const AppImageManager = struct {
                 const dir_path = std.fs.path.join(self.allocator, &.{ root, entry.name }) catch continue;
                 defer self.allocator.free(dir_path);
                 std.Io.Dir.cwd().deleteTree(self.io, dir_path) catch |err| {
-                    std.log.warn("Could not remove config directory {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(dir_path), @import("diagnostics").cause(err), @errorName(err) });
+                    std.log.warn("Could not remove config directory {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(dir_path), diagnostics.cause(err), @errorName(err) });
                 };
             }
         }
@@ -1636,7 +1688,7 @@ fn freeAppImageStatic(allocator: std.mem.Allocator, value: appimage.AppImage) vo
 fn freeWorkingDir(allocator: std.mem.Allocator, io: std.Io, dir: *?[]u8) void {
     if (dir.*) |w| {
         std.Io.Dir.cwd().deleteTree(io, w) catch |err| {
-            std.log.warn("Could not remove AppImage extraction directory {0f}. {1s}\n\nTechnical details: {2s}", .{ @import("diagnostics").safe(w), @import("diagnostics").cause(err), @errorName(err) });
+            std.log.warn("Could not remove AppImage extraction directory {0f}. {1s}\n\nTechnical details: {2s}", .{ diagnostics.safe(w), diagnostics.cause(err), @errorName(err) });
         };
         allocator.free(w);
         dir.* = null;
@@ -3070,6 +3122,205 @@ test "removeAppImage removes matching entry from db by name" {
 
     try std.testing.expectEqual(1, result.len);
     try std.testing.expectEqualStrings("KeepMe", result[0].name);
+}
+
+// Paths and snapshots belong to the caller's test arena. The manager uses the
+// testing allocator so transaction allocations are still checked for leaks.
+const SyncTestFixture = struct {
+    manager: AppImageManager,
+    old_path: []const u8,
+    new_path: []const u8,
+    desktop_path: []const u8,
+    desktop_before: []const u8,
+    database_before: []const u8,
+
+    fn init(allocator: std.mem.Allocator, root: []const u8) !SyncTestFixture {
+        const source = try std.fs.path.join(allocator, &.{ root, "Editor.AppImage" });
+        const old_dir = try std.fs.path.join(allocator, &.{ root, "old" });
+        const new_dir = try std.fs.path.join(allocator, &.{ root, "new location" });
+        const database = try std.fs.path.join(allocator, &.{ root, "appimages.db" });
+        try writeTestAppImageDb(source, validTestAppImage);
+        const environ = try createTestAppImageEnviron(allocator, root);
+        var manager = AppImageManager{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+            .environ = environ,
+            .install_directory = old_dir,
+            .local_db_path = database,
+            .cache_command_run = successfulCacheCommand,
+        };
+        try std.testing.expect(try manager.installAppImage(source));
+        {
+            const apps = try manager.getAppImagesFromLocalDb();
+            defer manager.freeAppImages(apps);
+            var configured = apps[0];
+            configured.update_type = .github;
+            configured.update_url = "https://github.com/example/editor";
+            configured.repo_owner = "example";
+            configured.repo_name = "editor";
+            configured.allow_prerelease = true;
+            configured.command_line_args = "--no-sandbox %U";
+            configured.environment_variables = &.{.{ .key = "EDITOR_TEST", .value = "1" }};
+            try manager.addAppImageToLocalDb(configured);
+        }
+        const desktop_path = try std.fs.path.join(allocator, &.{ root, "data", "applications", "editor.desktop" });
+        manager.install_directory = new_dir;
+        return .{
+            .manager = manager,
+            .old_path = try std.fs.path.join(allocator, &.{ old_dir, "Editor.AppImage" }),
+            .new_path = try std.fs.path.join(allocator, &.{ new_dir, "Editor.AppImage" }),
+            .desktop_path = desktop_path,
+            .desktop_before = try readTestAppImageDb(allocator, desktop_path),
+            .database_before = try readTestAppImageDb(allocator, database),
+        };
+    }
+
+    fn expectOriginalIntegration(self: SyncTestFixture, allocator: std.mem.Allocator) !void {
+        try std.testing.expectEqualStrings(self.desktop_before, try readTestAppImageDb(allocator, self.desktop_path));
+        try std.testing.expectEqualStrings(self.database_before, try readTestAppImageDb(allocator, self.manager.local_db_path));
+    }
+
+    fn expectCommitted(self: SyncTestFixture, allocator: std.mem.Allocator) !void {
+        const stat = try std.Io.Dir.cwd().statFile(std.testing.io, self.new_path, .{});
+        try std.testing.expect(stat.permissions.toMode() & 0o111 == 0o111);
+        const desktop = try readTestAppImageDb(allocator, self.desktop_path);
+        const exec = try std.fmt.allocPrint(allocator, "Exec=env \"EDITOR_TEST=1\" \"{s}\"", .{self.new_path});
+        const try_exec = try std.fmt.allocPrint(allocator, "TryExec={s}\n", .{self.new_path});
+        try std.testing.expect(std.mem.indexOf(u8, desktop, exec) != null);
+        try std.testing.expect(std.mem.indexOf(u8, desktop, try_exec) != null);
+        try std.testing.expect(std.mem.indexOf(u8, desktop, self.old_path) == null);
+        const apps = try self.manager.getAppImagesFromLocalDb();
+        defer self.manager.freeAppImages(apps);
+        try std.testing.expectEqual(@as(usize, 1), apps.len);
+        try std.testing.expectEqualStrings(self.new_path, apps[0].path);
+        try std.testing.expectEqualStrings("Editor", apps[0].name);
+        try std.testing.expectEqualStrings("2.0.0", apps[0].version);
+        try std.testing.expectEqual(.github, apps[0].update_type);
+        try std.testing.expectEqualStrings("https://github.com/example/editor", apps[0].update_url);
+        try std.testing.expectEqualStrings("example", apps[0].repo_owner.?);
+        try std.testing.expectEqualStrings("editor", apps[0].repo_name.?);
+        try std.testing.expect(apps[0].allow_prerelease);
+        try std.testing.expectEqualStrings("--no-sandbox %U", apps[0].command_line_args);
+        try std.testing.expectEqualStrings("1", apps[0].environment_variables[0].value);
+        try expectOnlyInstalledAppImage(self.manager.install_directory, "Editor.AppImage");
+    }
+};
+
+test "syncAppImageMeta relocates executable files and repairs previously broken moves" {
+    for ([_]bool{ false, true }) |recover| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root = buffer[0..try tmp.dir.realPath(std.testing.io, &buffer)];
+        var fixture = try SyncTestFixture.init(allocator, root);
+        if (recover) {
+            try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture.manager.install_directory);
+            try fixture.manager.copyFile(fixture.old_path, fixture.new_path);
+            // Reproduce the non-executable copy left by older Shelly versions.
+            {
+                var legacy_copy = try std.Io.Dir.cwd().openFile(std.testing.io, fixture.new_path, .{});
+                defer legacy_copy.close(std.testing.io);
+                try legacy_copy.setPermissions(std.testing.io, .fromMode(0o644));
+            }
+            try std.Io.Dir.cwd().deleteFile(std.testing.io, fixture.old_path);
+            const stat = try std.Io.Dir.cwd().statFile(std.testing.io, fixture.new_path, .{});
+            try std.testing.expectEqual(@as(u32, 0), stat.permissions.toMode() & 0o111);
+        }
+        try std.testing.expect(try fixture.manager.syncAppImageMeta(&.{"Editor"}));
+        try fixture.expectCommitted(allocator);
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, fixture.old_path, .{}));
+        // A repeated sync must use the committed path and leave no temporary files.
+        try std.testing.expect(try fixture.manager.syncAppImageMeta(&.{"Editor"}));
+        try fixture.expectCommitted(allocator);
+    }
+}
+
+test "syncAppImageMeta preserves installation on relocation failure" {
+    const Failure = enum { extraction, spawn, unreadable_source, unwritable_destination, blocked_parent, desktop, database };
+    for (std.enums.values(Failure)) |failure| {
+        // Root bypasses the filesystem permission failures used by these cases.
+        if (std.os.linux.geteuid() == 0 and
+            (failure == .unreadable_source or failure == .unwritable_destination or failure == .desktop)) continue;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root = buffer[0..try tmp.dir.realPath(std.testing.io, &buffer)];
+        var fixture = try SyncTestFixture.init(allocator, root);
+        var restricted_file: ?std.Io.File = null;
+        defer if (restricted_file) |file| {
+            file.setPermissions(std.testing.io, .fromMode(0o755)) catch {};
+            file.close(std.testing.io);
+        };
+        var restricted_dir: ?std.Io.Dir = null;
+        defer if (restricted_dir) |dir| {
+            dir.setPermissions(std.testing.io, .fromMode(0o755)) catch {};
+            dir.close(std.testing.io);
+        };
+        switch (failure) {
+            .extraction => try writeTestAppImageDb(fixture.old_path, "#!/bin/sh\nexit 1\n"),
+            .spawn => try writeTestAppImageDb(fixture.old_path, "#!/nonexistent/shelly-test-interpreter\n"),
+            .unreadable_source => {
+                restricted_file = try std.Io.Dir.cwd().openFile(std.testing.io, fixture.old_path, .{});
+                try restricted_file.?.setPermissions(std.testing.io, .fromMode(0));
+            },
+            .unwritable_destination => {
+                try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture.manager.install_directory);
+                restricted_dir = try std.Io.Dir.cwd().openDir(std.testing.io, fixture.manager.install_directory, .{ .iterate = true });
+                try restricted_dir.?.setPermissions(std.testing.io, .fromMode(0o500));
+            },
+            .blocked_parent => try writeTestAppImageDb(fixture.manager.install_directory, "not a directory"),
+            .desktop => {
+                restricted_dir = try std.Io.Dir.cwd().openDir(std.testing.io, std.fs.path.dirname(fixture.desktop_path).?, .{ .iterate = true });
+                try restricted_dir.?.setPermissions(std.testing.io, .fromMode(0o500));
+            },
+            .database => fixture.manager.database_commit = failDatabaseCommit,
+        }
+        switch (failure) {
+            .extraction, .desktop, .database => try std.testing.expect(!try fixture.manager.syncAppImageMeta(&.{"Editor"})),
+            .spawn => try std.testing.expectError(error.FileNotFound, fixture.manager.syncAppImageMeta(&.{"Editor"})),
+            .unreadable_source, .unwritable_destination => try std.testing.expectError(error.AccessDenied, fixture.manager.syncAppImageMeta(&.{"Editor"})),
+            .blocked_parent => try std.testing.expectError(error.NotDir, fixture.manager.syncAppImageMeta(&.{"Editor"})),
+        }
+        _ = try std.Io.Dir.cwd().statFile(std.testing.io, fixture.old_path, .{});
+        try fixture.expectOriginalIntegration(allocator);
+        if (failure != .blocked_parent) {
+            try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, fixture.new_path, .{}));
+            // Any created staging directory must be empty after rollback.
+            if (std.Io.Dir.cwd().openDir(std.testing.io, fixture.manager.install_directory, .{ .iterate = true })) |opened| {
+                var directory = opened;
+                defer directory.close(std.testing.io);
+                var iterator = directory.iterate();
+                try std.testing.expect((try iterator.next(std.testing.io)) == null);
+            } else |err| {
+                try std.testing.expectEqual(error.FileNotFound, err);
+            }
+        }
+    }
+}
+
+test "syncAppImageMeta keeps a preexisting destination after database failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = buffer[0..try tmp.dir.realPath(std.testing.io, &buffer)];
+    var fixture = try SyncTestFixture.init(allocator, root);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture.manager.install_directory);
+    try fixture.manager.copyFile(fixture.old_path, fixture.new_path);
+    fixture.manager.database_commit = failDatabaseCommit;
+    try std.testing.expect(!try fixture.manager.syncAppImageMeta(&.{"Editor"}));
+    try fixture.expectOriginalIntegration(allocator);
+    try std.testing.expectEqualStrings(validTestAppImage, try readTestAppImageDb(allocator, fixture.new_path));
+    try std.testing.expectEqualStrings(validTestAppImage, try readTestAppImageDb(allocator, fixture.old_path));
+    try expectOnlyInstalledAppImage(fixture.manager.install_directory, "Editor.AppImage");
 }
 
 test "syncAppImageMeta removes a stale entry when the AppImage file is missing" {

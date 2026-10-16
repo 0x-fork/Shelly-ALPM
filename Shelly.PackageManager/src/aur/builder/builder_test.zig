@@ -517,6 +517,7 @@ test "PackageBuilder signs published packages with the configured signing key" {
     const gnupg_home = try prepareSigningPgpHome(&fixture);
     defer allocator.free(gnupg_home);
     fixture.builder.options.sign = true;
+    fixture.builder.shellybuild_config.package.compression_level = .maximum;
     fixture.builder.options.sign_key = signing_pgp_fingerprint;
     fixture.builder.options.sign_gnupg_home = gnupg_home;
 
@@ -545,11 +546,118 @@ test "PackageBuilder signs published packages with the configured signing key" {
     const log = try readOnlyBuildLog(allocator, io, fixture.build_dir);
     defer allocator.free(log);
     try testing.expect(std.mem.indexOf(u8, log, "[phase] signing") != null);
+    try testing.expect(std.mem.indexOf(u8, log, "[compression] preset 5 (maximum), zstd level 19") != null);
 
     // Terminate the gpg-agent daemon spawned during signing so it does not
     // outlive the fixture and interfere with teardown.
     var kill = try process_runner.run(allocator, io, &.{ "/usr/bin/gpgconf", "--homedir", gnupg_home, "--kill", "gpg-agent" }, null, null);
     defer kill.deinit(allocator);
+}
+
+test "PackageBuilder signs the package carch artifact under its relabelled name" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=signing-carch-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('x86_64')
+        \\package() {
+        \\  mkdir -p "$pkgdir/usr/share/signing-carch-demo"
+        \\  printf 'signed v3 payload\n' > "$pkgdir/usr/share/signing-carch-demo/data"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    const gnupg_home = try prepareSigningPgpHome(&fixture);
+    defer allocator.free(gnupg_home);
+    fixture.builder.options.sign = true;
+    fixture.builder.options.sign_key = signing_pgp_fingerprint;
+    fixture.builder.options.sign_gnupg_home = gnupg_home;
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
+    try expectPackageArchitecture(allocator, artifacts[0], "/signing-carch-demo-1-1-x86_64_v3.pkg.tar.zst", "x86_64_v3");
+
+    // The detached signature sits next to, and verifies, the v3 archive; no
+    // archive or signature under the build.carch name is published.
+    const signature_path = try std.fmt.allocPrint(allocator, "{s}.sig", .{artifacts[0].path});
+    defer allocator.free(signature_path);
+    try std.Io.Dir.cwd().access(io, signature_path, .{});
+    for ([_][]const u8{ "signing-carch-demo-1-1-x86_64.pkg.tar.zst", "signing-carch-demo-1-1-x86_64.pkg.tar.zst.sig" }) |name| {
+        const stale = try std.fs.path.join(allocator, &.{ fixture.build_dir, name });
+        defer allocator.free(stale);
+        try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, stale, .{}));
+    }
+
+    const verifier = source_pgp_verifier.Verifier{
+        .allocator = allocator,
+        .io = io,
+        .environ = testing.environ,
+        .gnupg_home = gnupg_home,
+    };
+    var verification = try verifier.verifyDetached(
+        signature_path,
+        artifacts[0].path,
+        &.{signing_pgp_fingerprint},
+    );
+    defer verification.deinit(allocator);
+    try testing.expectEqualStrings(signing_pgp_fingerprint, verification.primary_fingerprint);
+    try testing.expectEqual(source_pgp_verifier.Warning.none, verification.warning);
+
+    var kill = try process_runner.run(allocator, io, &.{ "/usr/bin/gpgconf", "--homedir", gnupg_home, "--kill", "gpg-agent" }, null, null);
+    defer kill.deinit(allocator);
+}
+
+test "PackageBuilder compression presets apply to every split package" {
+    const allocator = testing.allocator;
+    const content =
+        \\pkgname=('compression-demo' 'compression-docs')
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\package_compression-demo() {
+        \\  install -dm755 "$pkgdir/usr/share/demo"
+        \\  printf 'main payload\n' > "$pkgdir/usr/share/demo/data"
+        \\}
+        \\package_compression-docs() {
+        \\  install -dm755 "$pkgdir/usr/share/demo"
+        \\  printf 'documentation\n' > "$pkgdir/usr/share/demo/data"
+        \\}
+    ;
+    for (std.enums.values(archive.compression_policy.Preset)) |preset| {
+        var fixture = try Fixture.createMany(allocator, content, &.{ "compression-demo", "compression-docs" }, null);
+        defer fixture.destroy();
+        fixture.builder.shellybuild_config.package.extension = ".pkg.tar.bz2";
+        fixture.builder.shellybuild_config.package.compression_level = preset;
+        const artifacts = try fixture.builder.BuildPackage();
+        defer builder_mod.deinitArtifacts(allocator, artifacts);
+        try testing.expectEqual(@as(usize, 2), artifacts.len);
+        for (artifacts) |artifact| {
+            var file = try std.Io.Dir.cwd().openFile(testing.io, artifact.path, .{});
+            defer file.close(testing.io);
+            var header: [4]u8 = undefined;
+            try testing.expectEqual(header.len, try file.readPositionalAll(testing.io, &header, 0));
+            const expected = [_][]const u8{ "BZh1", "BZh3", "BZh5", "BZh7", "BZh9" };
+            try testing.expectEqualStrings(expected[@intFromEnum(preset) - 1], &header);
+            var reader = try archive.Reader.init(allocator, artifact.path);
+            defer reader.deinit();
+            var found: usize = 0;
+            while (try reader.next()) |entry| {
+                if (std.mem.eql(u8, entry.path, "usr/share/demo/data")) {
+                    const payload = if (std.mem.eql(u8, artifact.package_name, "compression-demo")) "main payload\n" else "documentation\n";
+                    var bytes: [64]u8 = undefined;
+                    const count = try reader.readPrefix(&bytes);
+                    try testing.expectEqualStrings(payload, bytes[0..count]);
+                    found += 1;
+                } else if (std.mem.eql(u8, entry.path, ".PKGINFO") or std.mem.eql(u8, entry.path, ".BUILDINFO") or std.mem.eql(u8, entry.path, ".MTREE")) {
+                    found += 1;
+                }
+            }
+            try testing.expectEqual(@as(usize, 4), found);
+        }
+    }
 }
 
 test "PackageBuilder fails atomically when the signing key is unavailable" {
@@ -581,6 +689,7 @@ test "PackageBuilder fails atomically when the signing key is unavailable" {
     fixture.builder.options.sign = true;
     fixture.builder.options.sign_key = signing_pgp_fingerprint;
     fixture.builder.options.sign_gnupg_home = short_home;
+    fixture.builder.shellybuild_config.package.compression_level = .maximum;
 
     try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
 
@@ -1900,6 +2009,153 @@ test "PackageBuilder simulates root ownership without host chown" {
     try testing.expect(saw_installed);
 }
 
+test "PackageBuilder issue 2025 ownership journal is independent of package locale" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_][]const u8{ "C.UTF-8", "comma" }) |locale| {
+        const content = try std.fmt.allocPrint(allocator,
+            \\pkgname=locale-ownership
+            \\pkgver=1
+            \\arch=('any')
+            \\package() {{
+            \\  export LOCPATH="$startdir/locales"
+            \\  export LC_ALL={s}
+            \\  before=$(/usr/bin/locale decimal_point)
+            \\  [[ "$before" = '{s}' ]]
+            \\  mkdir -p "$pkgdir/usr/share/demo/tree"
+            \\  cd "$pkgdir/usr/share/demo"
+            \\  touch root tree/data group helper external
+            \\  chown -R root:root "$pkgdir"
+            \\  chown root:root root
+            \\  chown -R 1000:1000 tree
+            \\  chgrp 50 group
+            \\  install --owner=42 --group=84 -m644 /dev/null installed
+            \\  ln -s tree/data link
+            \\  chown -h 43:85 link
+            \\  __shelly_record_ownership C 44:86 "$PWD/helper"
+            \\  /bin/sh -ec 'chown 45:87 "$1"; chgrp 88 "$1"' sh "$PWD/external"
+            \\  [[ "$LC_ALL" = '{s}' ]]
+            \\  [[ "$(/usr/bin/locale decimal_point)" = "$before" ]]
+            \\}}
+        , .{ locale, if (std.mem.eql(u8, locale, "C.UTF-8")) "." else ",", locale });
+        defer allocator.free(content);
+        var fixture = try Fixture.create(allocator, content, null, null);
+        defer fixture.destroy();
+
+        if (std.mem.eql(u8, locale, "comma")) {
+            // Minimal CI images omit /usr/share/i18n. Supply both inputs instead
+            // of depending on installed locale sources or character maps.
+            try fixture.temporary.dir.createDir(io, "locales", .default_dir);
+            try fixture.temporary.dir.writeFile(io, .{ .sub_path = "locale-charmap", .data =
+                \\<code_set_name> "ASCII"
+                \\<mb_cur_min> 1
+                \\<mb_cur_max> 1
+                \\CHARMAP
+                \\<U0000>..<U007F> \x00
+                \\END CHARMAP
+                \\
+            });
+            try fixture.temporary.dir.writeFile(io, .{ .sub_path = "locale-numeric", .data =
+                \\LC_NUMERIC
+                \\decimal_point ","
+                \\thousands_sep "."
+                \\grouping 3
+                \\END LC_NUMERIC
+                \\
+            });
+            var result = try process_runner.run(allocator, io, &.{
+                "localedef", "--no-archive", "--quiet", "-c", "-i", "./locale-numeric", "-f", "./locale-charmap", "./locales/comma",
+            }, fixture.build_dir, null);
+            defer result.deinit(allocator);
+            // -c emits default categories for those we omit; localedef returns
+            // 1 for those warnings even with --quiet. Real errors still print
+            // diagnostics. package() also verifies the loaded decimal point.
+            try testing.expect(result.exit_code == 0 or result.exit_code == 1);
+            try testing.expectEqualStrings("", result.stderr);
+        }
+
+        const artifacts = try fixture.builder.BuildPackage();
+        defer builder_mod.deinitArtifacts(allocator, artifacts);
+        const expected = [_]struct { path: []const u8, uid: i64, gid: i64 }{
+            .{ .path = "usr/share/demo/root", .uid = 0, .gid = 0 },
+            .{ .path = "usr/share/demo/tree/data", .uid = 1000, .gid = 1000 },
+            .{ .path = "usr/share/demo/group", .uid = 0, .gid = 50 },
+            .{ .path = "usr/share/demo/installed", .uid = 42, .gid = 84 },
+            .{ .path = "usr/share/demo/link", .uid = 43, .gid = 85 },
+            .{ .path = "usr/share/demo/helper", .uid = 44, .gid = 86 },
+            .{ .path = "usr/share/demo/external", .uid = 45, .gid = 88 },
+        };
+        var reader = try archive.Reader.init(allocator, artifacts[0].path);
+        defer reader.deinit();
+        var seen = [_]bool{false} ** expected.len;
+        while (try reader.next()) |entry| {
+            for (expected, 0..) |item, index| {
+                if (!std.mem.eql(u8, entry.path, item.path)) continue;
+                try testing.expectEqual(item.uid, entry.uid);
+                try testing.expectEqual(item.gid, entry.gid);
+                seen[index] = true;
+            }
+        }
+        const host_owner = try std.fmt.allocPrint(allocator, "{d}:{d}", .{ std.os.linux.geteuid(), std.os.linux.getegid() });
+        defer allocator.free(host_owner);
+        for (expected, seen) |item, found| {
+            try testing.expect(found);
+            const staged_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "pkg/locale-ownership", item.path });
+            defer allocator.free(staged_path);
+            var stat = try process_runner.run(allocator, io, &.{ "stat", "-c", "%u:%g", staged_path }, null, null);
+            defer stat.deinit(allocator);
+            try testing.expectEqual(@as(u8, 0), stat.exit_code);
+            try testing.expectEqualStrings(host_owner, std.mem.trim(u8, stat.stdout, " \t\r\n"));
+        }
+    }
+}
+
+test "PackageBuilder issue 2025 journal failures explain the reason in events and logs" {
+    const allocator = testing.allocator;
+    const cases = [_]struct { command: []const u8, reason: []const u8 }{
+        .{ .command = "printf 'broken\\0' >> \"$__shelly_virtual_ownership_log\"", .reason = "InvalidVirtualOwnershipJournal" },
+        .{ .command = "chown shelly-owner-that-does-not-exist \"$pkgdir/data\"", .reason = "UnknownVirtualOwner" },
+    };
+    for (cases) |case| {
+        const Capture = struct {
+            reason: []const u8,
+            seen: bool = false,
+
+            fn handle(data: ?*anyopaque, event: op_context.Event) void {
+                const self: *@This() = @ptrCast(@alignCast(data.?));
+                switch (event) {
+                    .failure => |failure| {
+                        if (std.mem.indexOf(u8, failure.message, "Cannot read package ownership journal") != null and
+                            std.mem.indexOf(u8, failure.message, self.reason) != null)
+                            self.seen = true;
+                    },
+                    else => {},
+                }
+            }
+        };
+        var capture: Capture = .{ .reason = case.reason };
+        const content = try std.fmt.allocPrint(allocator,
+            \\pkgname=journal-failure
+            \\pkgver=1
+            \\arch=('any')
+            \\package() {{
+            \\  export LC_ALL=C
+            \\  touch "$pkgdir/data"
+            \\  {s}
+            \\}}
+        , .{case.command});
+        defer allocator.free(content);
+        var fixture = try Fixture.create(allocator, content, .{ .function = Capture.handle, .data = &capture }, null);
+        defer fixture.destroy();
+        try testing.expectError(error.PrivilegedPackageOperationUnsupported, fixture.builder.BuildPackage());
+        try testing.expect(capture.seen);
+        const log = try readOnlyBuildLog(allocator, testing.io, fixture.build_dir);
+        defer allocator.free(log);
+        try testing.expect(std.mem.indexOf(u8, log, "[error] Cannot read package ownership journal") != null);
+        try testing.expect(std.mem.indexOf(u8, log, case.reason) != null);
+    }
+}
+
 test "PackageBuilder preserves non-root virtual ownership and special modes" {
     const allocator = testing.allocator;
     const io = testing.io;
@@ -2475,6 +2731,274 @@ test "PackageBuilder emits makepkg-compatible BUILDINFO and MTREE metadata" {
     const payload_hex = std.fmt.bytesToHex(payload_digest, .lower);
     try testing.expect(std.mem.indexOf(u8, gzip.stdout, &payload_hex) != null);
     try testing.expect(std.mem.indexOf(u8, gzip.stdout, "sha256digest=") != null);
+}
+
+test "PackageBuilder package carch relabels artifacts while PKGBUILD evaluation keeps build carch" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=package-carch-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('x86_64')
+        \\depends_x86_64=('carch-dependency')
+        \\package() {
+        \\  mkdir -p "$pkgdir/usr/share/package-carch-demo"
+        \\  printf '%s\n' "$CARCH" > "$pkgdir/usr/share/package-carch-demo/carch"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
+    try testing.expect(std.mem.endsWith(u8, artifacts[0].path, "/package-carch-demo-1-1-x86_64_v3.pkg.tar.zst"));
+
+    const pkg_info = try readPkgInfo(allocator, artifacts[0].path);
+    defer allocator.free(pkg_info);
+    try testing.expect(std.mem.indexOf(u8, pkg_info, "arch = x86_64_v3\n") != null);
+    try testing.expect(std.mem.indexOf(u8, pkg_info, "depend = carch-dependency\n") != null);
+    const build_info = try readPackageEntry(allocator, artifacts[0].path, ".BUILDINFO");
+    defer allocator.free(build_info);
+    try testing.expect(std.mem.indexOf(u8, build_info, "pkgarch = x86_64_v3\n") != null);
+    const evaluated_carch = try readPackageEntry(allocator, artifacts[0].path, "usr/share/package-carch-demo/carch");
+    defer allocator.free(evaluated_carch);
+    try testing.expectEqualStrings("x86_64\n", evaluated_carch);
+}
+
+test "PackageBuilder package carch leaves arch any packages untouched" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=package-carch-any-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\package() {
+        \\  mkdir -p "$pkgdir/usr/share/package-carch-any-demo"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expect(std.mem.endsWith(u8, artifacts[0].path, "/package-carch-any-demo-1-1-any.pkg.tar.zst"));
+    const pkg_info = try readPkgInfo(allocator, artifacts[0].path);
+    defer allocator.free(pkg_info);
+    try testing.expect(std.mem.indexOf(u8, pkg_info, "arch = any\n") != null);
+}
+
+fn expectPackageArchitecture(allocator: std.mem.Allocator, artifact: builder_mod.BuildArtifact, file_name: []const u8, architecture: []const u8) !void {
+    try testing.expect(std.mem.endsWith(u8, artifact.path, file_name));
+    const pkg_info = try readPkgInfo(allocator, artifact.path);
+    defer allocator.free(pkg_info);
+    const arch_line = try std.fmt.allocPrint(allocator, "arch = {s}\n", .{architecture});
+    defer allocator.free(arch_line);
+    try testing.expect(std.mem.indexOf(u8, pkg_info, arch_line) != null);
+    const build_info = try readPackageEntry(allocator, artifact.path, ".BUILDINFO");
+    defer allocator.free(build_info);
+    const pkgarch_line = try std.fmt.allocPrint(allocator, "pkgarch = {s}\n", .{architecture});
+    defer allocator.free(pkgarch_line);
+    try testing.expect(std.mem.indexOf(u8, build_info, pkgarch_line) != null);
+}
+
+test "PackageBuilder package carch labels each split member independently" {
+    const allocator = testing.allocator;
+    const content =
+        \\pkgbase=package-carch-split
+        \\pkgname=('package-carch-split-bin' 'package-carch-split-data')
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('x86_64')
+        \\package_package-carch-split-bin() {
+        \\  mkdir -p "$pkgdir/usr/bin"
+        \\  printf bin > "$pkgdir/usr/bin/package-carch-split"
+        \\}
+        \\package_package-carch-split-data() {
+        \\  arch=('any')
+        \\  mkdir -p "$pkgdir/usr/share/package-carch-split"
+        \\  printf data > "$pkgdir/usr/share/package-carch-split/data"
+        \\}
+    ;
+    const requested = [_][]const u8{ "package-carch-split-bin", "package-carch-split-data" };
+    var fixture = try Fixture.createMany(allocator, content, &requested, null);
+    defer fixture.destroy();
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 2), artifacts.len);
+    for (artifacts) |artifact| {
+        if (std.mem.eql(u8, artifact.package_name, "package-carch-split-bin")) {
+            try expectPackageArchitecture(allocator, artifact, "/package-carch-split-bin-1-1-x86_64_v3.pkg.tar.zst", "x86_64_v3");
+        } else {
+            try testing.expectEqualStrings("package-carch-split-data", artifact.package_name);
+            try expectPackageArchitecture(allocator, artifact, "/package-carch-split-data-1-1-any.pkg.tar.zst", "any");
+        }
+    }
+}
+
+test "PackageBuilder arch support check keeps build carch when package carch is set" {
+    // Contract: package.carch only relabels artifacts. A member that declares
+    // only the package architecture is unsupported for build.carch and skipped;
+    // if the support check ever used packageCarch(), it would be built too.
+    const allocator = testing.allocator;
+    const content =
+        \\pkgbase=package-carch-contract
+        \\pkgname=('package-carch-contract-native' 'package-carch-contract-v3-only')
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('x86_64' 'x86_64_v3')
+        \\package_package-carch-contract-native() {
+        \\  mkdir -p "$pkgdir/usr/share/native"
+        \\}
+        \\package_package-carch-contract-v3-only() {
+        \\  arch=('x86_64_v3')
+        \\  mkdir -p "$pkgdir/usr/share/v3-only"
+        \\}
+    ;
+    const requested = [_][]const u8{ "package-carch-contract-native", "package-carch-contract-v3-only" };
+    var fixture = try Fixture.createMany(allocator, content, &requested, null);
+    defer fixture.destroy();
+    try testing.expectEqualStrings("x86_64", fixture.builder.shellybuild_config.build.carch);
+    fixture.builder.shellybuild_config.package.carch = "x86_64_v3";
+
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
+    try testing.expectEqualStrings("package-carch-contract-native", artifacts[0].package_name);
+    try expectPackageArchitecture(allocator, artifacts[0], "/package-carch-contract-native-1-1-x86_64_v3.pkg.tar.zst", "x86_64_v3");
+}
+
+test "PackageBuilder SRCDEST keeps auxiliary downloads visible during make install issue 2017" {
+    const allocator = testing.allocator;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=srcdest-make-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\prepare() {
+        \\  printf fixture > "${SRCDEST:-$PWD}/DRV_WiFi_MTK_MT7925_MT7927_fixture.zip"
+        \\}
+        \\build() {
+        \\  local _zips=("${SRCDEST:-$PWD}"/DRV_WiFi_MTK_MT7925_MT7927*.zip)
+        \\  make -C "$startdir" sources DRIVER_ZIP="${_zips[0]}" SRCDIR="$srcdir/_build"
+        \\}
+        \\package() {
+        \\  make -C "$startdir" install SRCDIR="$srcdir/_build" DESTDIR="$pkgdir"
+        \\}
+    , null, null);
+    defer fixture.destroy();
+    // The upstream Makefile's phony prerequisite reruns source preparation
+    // during install, this time locating the ZIP relative to startdir.
+    try fixture.temporary.dir.writeFile(testing.io, .{
+        .sub_path = "Makefile",
+        .data = "DRIVER_ZIP ?= $(firstword $(wildcard DRV_WiFi_MTK_MT7925_MT7927*.zip))\n" ++
+            "STAMP := $(SRCDIR)/.sources-done\n" ++
+            ".PHONY: sources install check-version\n" ++
+            "check-version:\n\t@true\n" ++
+            "sources: $(STAMP)\n" ++
+            "$(STAMP): check-version\n" ++
+            "\t@test -n \"$(DRIVER_ZIP)\" && test -f \"$(DRIVER_ZIP)\"\n" ++
+            "\t@mkdir -p \"$(SRCDIR)\"\n" ++
+            "\t@cp \"$(DRIVER_ZIP)\" \"$(SRCDIR)/payload\"\n" ++
+            "\t@touch \"$(STAMP)\"\n" ++
+            "install: sources\n" ++
+            "\t@mkdir -p \"$(DESTDIR)/usr/share/srcdest-make-demo\"\n" ++
+            "\t@cp \"$(SRCDIR)/payload\" \"$(DESTDIR)/usr/share/srcdest-make-demo/payload\"\n",
+    });
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    const environ: std.process.Environ = .{ .block = try environment.createPosixBlock(allocator, .{}) };
+    defer environ.block.deinit(allocator);
+    fixture.builder.environ = environ;
+    const artifacts = try fixture.builder.run();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const output = try readPackageEntry(allocator, artifacts[0].path, "usr/share/srcdest-make-demo/payload");
+    defer allocator.free(output);
+    try testing.expectEqualStrings("fixture", output);
+    try fixture.temporary.dir.access(testing.io, "DRV_WiFi_MTK_MT7925_MT7927_fixture.zip", .{});
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(testing.io, "src/DRV_WiFi_MTK_MT7925_MT7927_fixture.zip", .{}));
+}
+
+test "PackageBuilder SRCDEST matches the source cache in metadata SRCINFO and every lifecycle step" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content =
+        \\pkgname=srcdest-demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\pkgdesc="$SRCDEST"
+        \\_record_source_destination() {
+        \\  [[ "$SRCDEST" = "$pkgdesc" ]]
+        \\  [[ "$(bash -c 'printf %s "$SRCDEST"')" = "$SRCDEST" ]]
+        \\  printf '%s\n' "$SRCDEST" >> "$SRCDEST/phases"
+        \\}
+        \\verify() { _record_source_destination; }
+        \\prepare() { _record_source_destination; }
+        \\pkgver() { _record_source_destination; printf '1\n'; }
+        \\build() { _record_source_destination; }
+        \\check() { _record_source_destination; }
+        \\package() {
+        \\  _record_source_destination
+        \\  mkdir -p "$pkgdir/usr/share/srcdest-demo"
+        \\  cp "$SRCDEST/phases" "$pkgdir/usr/share/srcdest-demo/phases"
+        \\}
+    ;
+    for ([_]bool{ false, true }) |separate_cache| {
+        var fixture = try Fixture.create(allocator, content, null, null);
+        defer fixture.destroy();
+        var cache = std.testing.tmpDir(.{});
+        defer cache.cleanup();
+        try cache.dir.createDirPath(io, "source cache 'quoted' $literal");
+        const cache_path = try cache.dir.realPathFileAlloc(io, "source cache 'quoted' $literal", allocator);
+        defer allocator.free(cache_path);
+        const destination = if (separate_cache) cache_path else fixture.build_dir;
+        fixture.builder.options.source_destination = destination;
+        fixture.builder.options.sources_prepared = false;
+        fixture.builder.options.skip_source_pgp_verification = false;
+        fixture.builder.options.run_verify = true;
+        var environment = std.process.Environ.Map.init(allocator);
+        defer environment.deinit();
+        try environment.put("SRCDEST", "/inherited/wrong-source-cache");
+        const environ: std.process.Environ = .{ .block = try environment.createPosixBlock(allocator, .{}) };
+        defer environ.block.deinit(allocator);
+        fixture.builder.environ = environ;
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+        defer allocator.free(path);
+        fixture.builder.options.pkgbuild_path = path;
+        var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+        defer operation.finish(.success);
+        var review = try fixture.builder.prepareFinalReviewWithOperation(&operation);
+        defer review.deinit();
+        fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+        fixture.builder.options.reviewed_files = review.reviewed_files;
+        fixture.builder.options.install_scripts = review.install_scripts;
+        var srcinfo: std.Io.Writer.Allocating = .init(allocator);
+        defer srcinfo.deinit();
+        try fixture.builder.writeSrcinfoWithOperation(&operation, &srcinfo.writer);
+        const description = try std.fmt.allocPrint(allocator, "pkgdesc = {s}\n", .{destination});
+        defer allocator.free(description);
+        try testing.expect(std.mem.indexOf(u8, srcinfo.written(), description) != null);
+        const phases_path = try std.fs.path.join(allocator, &.{ destination, "phases" });
+        defer allocator.free(phases_path);
+        const srcinfo_phases = try std.Io.Dir.cwd().readFileAlloc(io, phases_path, allocator, .unlimited);
+        defer allocator.free(srcinfo_phases);
+        const expected_srcinfo_phases = try std.fmt.allocPrint(allocator, "{0s}\n{0s}\n{0s}\n", .{destination});
+        defer allocator.free(expected_srcinfo_phases);
+        try testing.expectEqualStrings(expected_srcinfo_phases, srcinfo_phases);
+        try std.Io.Dir.cwd().deleteFile(io, phases_path);
+        const artifacts = try fixture.builder.runWithOperation(&operation);
+        defer builder_mod.deinitArtifacts(allocator, artifacts);
+        const output = try readPackageEntry(allocator, artifacts[0].path, "usr/share/srcdest-demo/phases");
+        defer allocator.free(output);
+        const expected = try std.fmt.allocPrint(allocator, "{0s}\n{0s}\n{0s}\n{0s}\n{0s}\n{0s}\n", .{destination});
+        defer allocator.free(expected);
+        try testing.expectEqualStrings(expected, output);
+        try testing.expectEqualStrings("/inherited/wrong-source-cache", environ.getPosix("SRCDEST").?);
+    }
 }
 
 test "PackageBuilder uses configured PATH for metadata SRCINFO and lifecycle steps" {
@@ -4111,6 +4635,257 @@ test "PackageBuilder extracts source archives into srcdir" {
     try fixture.temporary.dir.access(io, "pkg/demo/usr/share/demo/source.txt", .{});
 }
 
+test "PackageBuilder extracts fish source archive duplicate regular files using the last entry" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('fish-4.9.3.tar.xz')
+        \\sha256sums=('SKIP')
+        \\prepare() {
+        \\  test "$(cat "$srcdir/fish-4.9.3/Cargo.toml")" = release || return 1
+        \\  test "$(cat "$srcdir/fish-4.9.3/Cargo.lock")" = locked || return 1
+        \\}
+        \\package() { install -Dm644 "$srcdir/fish-4.9.3/Cargo.toml" "$pkgdir/usr/share/demo/Cargo.toml"; }
+    , null, null);
+    defer fixture.destroy();
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "fish-4.9.3.tar.xz" });
+    defer allocator.free(path);
+    const original_mtime: std.Io.Timestamp = .{ .nanoseconds = 1_234_567_890 * std.time.ns_per_s };
+    const release_mtime: std.Io.Timestamp = .{ .nanoseconds = original_mtime.nanoseconds + 7 * std.time.ns_per_s };
+    // Release tarballs can append revised manifests after the original tree.
+    // Include a read-only original, shorter replacement, empty replacement,
+    // normalized duplicate path, and links resolved after the final revision.
+    try archive.writeFixture(allocator, path, .xz, &.{
+        .{ .path = "manifest-link", .kind = .hard_link, .link_target = "fish-4.9.3/Cargo.toml" },
+        .{ .path = "fish-4.9.3/Cargo.toml", .contents = "development manifest\n", .permissions = 0o444, .mtime = original_mtime },
+        .{ .path = "fish-4.9.3/Cargo.lock", .contents = "development lockfile\n" },
+        .{ .path = "fish-4.9.3/empty", .contents = "removed contents" },
+        .{ .path = "lock-link", .kind = .hard_link, .link_target = "fish-4.9.3/Cargo.lock" },
+        .{ .path = "fish-4.9.3/Cargo.toml", .contents = "release\n", .permissions = 0o640, .mtime = release_mtime },
+        .{ .path = "./fish-4.9.3//Cargo.lock", .contents = "locked\n" },
+        .{ .path = "fish-4.9.3/empty" },
+    });
+    fixture.builder.options.sources_prepared = false;
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const packaged = try fixture.temporary.dir.readFileAlloc(io, "pkg/demo/usr/share/demo/Cargo.toml", allocator, .unlimited);
+    defer allocator.free(packaged);
+    try testing.expectEqualStrings("release\n", packaged);
+    const manifest = try fixture.temporary.dir.statFile(io, "src/fish-4.9.3/Cargo.toml", .{});
+    try testing.expectEqual(@as(u32, 0o640), manifest.permissions.toMode() & 0o777);
+    try testing.expectEqual(release_mtime.nanoseconds, manifest.mtime.nanoseconds);
+    const empty = try fixture.temporary.dir.statFile(io, "src/fish-4.9.3/empty", .{});
+    try testing.expectEqual(@as(u64, 0), empty.size);
+    for ([_][2][]const u8{
+        .{ "src/fish-4.9.3/Cargo.toml", "src/manifest-link" },
+        .{ "src/fish-4.9.3/Cargo.lock", "src/lock-link" },
+    }) |pair| {
+        const original = try fixture.temporary.dir.statFile(io, pair[0], .{});
+        const link = try fixture.temporary.dir.statFile(io, pair[1], .{ .follow_symlinks = false });
+        try testing.expectEqual(std.Io.File.Kind.file, link.kind);
+        try testing.expectEqual(original.inode, link.inode);
+    }
+}
+
+test "PackageBuilder rejects duplicate source archive entries with conflicting types" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const cases = [_][]const archive.FixtureEntry{
+        &.{ .{ .path = "entry", .kind = .directory }, .{ .path = "entry", .contents = "replacement" } },
+        &.{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .kind = .directory } },
+        &.{ .{ .path = "entry", .link_target = "target" }, .{ .path = "entry", .contents = "replacement" } },
+        &.{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .link_target = "target" } },
+        &.{ .{ .path = "entry", .kind = .hard_link, .link_target = "target" }, .{ .path = "entry", .contents = "replacement" } },
+        &.{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .kind = .hard_link, .link_target = "target" } },
+        &.{ .{ .path = "entry/child", .contents = "implicit directory" }, .{ .path = "entry", .contents = "replacement" } },
+        &.{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .contents = "revision" }, .{ .path = "entry", .link_target = "target" } },
+    };
+    for (cases) |entries| {
+        var fixture = try Fixture.create(allocator,
+            \\pkgname=demo
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('payload.tar.gz')
+            \\sha256sums=('SKIP')
+            \\prepare() { touch "$startdir/prepare-ran"; }
+            \\package() { :; }
+        , null, null);
+        defer fixture.destroy();
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "payload.tar.gz" });
+        defer allocator.free(path);
+        try archive.writeFixture(allocator, path, .gzip, entries);
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "src/keep", .data = "previous source tree" });
+        fixture.builder.options.sources_prepared = false;
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        const kept = try fixture.temporary.dir.readFileAlloc(io, "src/keep", allocator, .unlimited);
+        defer allocator.free(kept);
+        try testing.expectEqualStrings("previous source tree", kept);
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "prepare-ran", .{}));
+    }
+}
+
+test "PackageBuilder overlays source archives in source order with final metadata" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_][]const u8{ "'first.tar' 'second.tar'", "'second.tar' 'first.tar'", "'first.tar' 'second.tar' 'third.tar'" }) |sources| {
+        const three = std.mem.indexOf(u8, sources, "third") != null;
+        const pkgbuild = try std.fmt.allocPrint(allocator, "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\nsource=({s})\nsha256sums=({s})\npackage() {{ :; }}\n", .{ sources, if (three) "'SKIP' 'SKIP' 'SKIP'" else "'SKIP' 'SKIP'" });
+        defer allocator.free(pkgbuild);
+        var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+        defer fixture.destroy();
+        const names = [_][]const u8{ "first.tar", "second.tar", "third.tar" };
+        const contents = [_][]const u8{ "long original contents", "short", "" };
+        const modes = [_]u32{ 0o444, 0o640, 0o600 };
+        for (names, 0..) |name, index| {
+            const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, name });
+            defer allocator.free(path);
+            try archive.writeFixture(allocator, path, .none, &.{
+                .{ .path = "demo", .kind = .directory },
+                .{ .path = "./demo//manifest.txt", .contents = contents[index], .permissions = modes[index], .mtime = .{ .nanoseconds = (1_234_567_890 + @as(i96, @intCast(index))) * std.time.ns_per_s } },
+            });
+        }
+        fixture.builder.options.sources_prepared = false;
+        const artifacts = try fixture.builder.BuildPackage();
+        defer builder_mod.deinitArtifacts(allocator, artifacts);
+        const last: usize = if (three) 2 else if (std.mem.startsWith(u8, sources, "'first")) 1 else 0;
+        const actual = try fixture.temporary.dir.readFileAlloc(io, "src/demo/manifest.txt", allocator, .unlimited);
+        defer allocator.free(actual);
+        try testing.expectEqualStrings(contents[last], actual);
+        const stat = try fixture.temporary.dir.statFile(io, "src/demo/manifest.txt", .{});
+        try testing.expectEqual(modes[last], stat.permissions.toMode() & 0o777);
+        try testing.expectEqual((1_234_567_890 + @as(i96, @intCast(last))) * std.time.ns_per_s, stat.mtime.nanoseconds);
+    }
+}
+
+test "PackageBuilder overlays source archives without changing earlier hard link inodes" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('first.tar' 'second.tar')
+        \\sha256sums=('SKIP' 'SKIP')
+        \\package() { :; }
+    , null, null);
+    defer fixture.destroy();
+    const first = try std.fs.path.join(allocator, &.{ fixture.build_dir, "first.tar" });
+    defer allocator.free(first);
+    const second = try std.fs.path.join(allocator, &.{ fixture.build_dir, "second.tar" });
+    defer allocator.free(second);
+    try archive.writeFixture(allocator, first, .none, &.{
+        .{ .path = "manifest", .contents = "original", .permissions = 0o444 },
+        .{ .path = "old-link", .kind = .hard_link, .link_target = "manifest" },
+    });
+    try archive.writeFixture(allocator, second, .none, &.{
+        .{ .path = "new-link", .kind = .hard_link, .link_target = "manifest" },
+        .{ .path = "manifest", .contents = "intermediate" },
+        .{ .path = "./manifest", .contents = "final" },
+    });
+    fixture.builder.options.sources_prepared = false;
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    for ([_][2][]const u8{ .{ "src/old-link", "original" }, .{ "src/new-link", "final" }, .{ "src/manifest", "final" } }) |pair| {
+        const actual = try fixture.temporary.dir.readFileAlloc(io, pair[0], allocator, .unlimited);
+        defer allocator.free(actual);
+        try testing.expectEqualStrings(pair[1], actual);
+    }
+    const original = try fixture.temporary.dir.statFile(io, "src/old-link", .{});
+    const current = try fixture.temporary.dir.statFile(io, "src/manifest", .{});
+    const link = try fixture.temporary.dir.statFile(io, "src/new-link", .{});
+    try testing.expect(original.inode != current.inode);
+    try testing.expectEqual(current.inode, link.inode);
+}
+
+test "PackageBuilder overlays source archives including VMware ISO manifests" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var fixture = try Fixture.create(allocator,
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=1
+        \\arch=('any')
+        \\source=('linux.iso' 'linuxPreGlibc25.iso')
+        \\sha256sums=('SKIP' 'SKIP')
+        \\prepare() { test "$(cat manifest.txt)" = legacy; }
+        \\package() { :; }
+    , null, null);
+    defer fixture.destroy();
+    for ([_][2][]const u8{ .{ "linux.iso", "current" }, .{ "linuxPreGlibc25.iso", "legacy" } }) |pair| {
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, pair[0] });
+        defer allocator.free(path);
+        try archive.writeIsoFixture(allocator, path, &.{
+            .{ .path = "manifest.txt", .contents = pair[1], .permissions = 0o555 },
+            .{ .path = "run_upgrader.sh", .contents = pair[1], .permissions = 0o555 },
+        });
+    }
+    fixture.builder.options.sources_prepared = false;
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    for ([_][]const u8{ "linux.iso", "linuxPreGlibc25.iso" }) |name| {
+        const staged = try std.fs.path.join(allocator, &.{ "src", name });
+        defer allocator.free(staged);
+        const original = try fixture.temporary.dir.readFileAlloc(io, name, allocator, .unlimited);
+        defer allocator.free(original);
+        const actual = try fixture.temporary.dir.readFileAlloc(io, staged, allocator, .unlimited);
+        defer allocator.free(actual);
+        try testing.expectEqualSlices(u8, original, actual);
+    }
+}
+
+test "PackageBuilder overlays source archives reject conflicting types and roll back replacements" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const cases = [_][2]archive.FixtureEntry{
+        .{ .{ .path = "entry", .link_target = "target" }, .{ .path = "entry", .contents = "replacement" } },
+        .{ .{ .path = "entry", .kind = .hard_link, .link_target = "target" }, .{ .path = "entry", .contents = "replacement" } },
+        .{ .{ .path = "entry", .kind = .directory }, .{ .path = "entry", .contents = "replacement" } },
+        .{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .link_target = "target" } },
+        .{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .kind = .hard_link, .link_target = "target" } },
+        .{ .{ .path = "entry", .contents = "original" }, .{ .path = "entry", .kind = .directory } },
+        .{ .{ .path = "entry", .link_target = "." }, .{ .path = "entry/child", .contents = "replacement" } },
+        .{ .{ .path = "entry/child", .contents = "original" }, .{ .path = "entry", .contents = "replacement" } },
+        .{ .{ .path = "entry", .contents = "original" }, .{ .path = "../outside", .contents = "replacement" } },
+    };
+    for (cases) |pair| {
+        var fixture = try Fixture.create(allocator,
+            \\pkgname=demo
+            \\pkgver=1
+            \\pkgrel=1
+            \\arch=('any')
+            \\source=('first.tar' 'second.tar')
+            \\sha256sums=('SKIP' 'SKIP')
+            \\prepare() { touch "$startdir/prepare-ran"; }
+            \\package() { :; }
+        , null, null);
+        defer fixture.destroy();
+        for ([_][]const u8{ "first.tar", "second.tar" }, 0..) |name, index| {
+            const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, name });
+            defer allocator.free(path);
+            try archive.writeFixture(allocator, path, .none, &.{
+                .{ .path = "manifest", .contents = name },
+                .{ .path = "target", .contents = name },
+                pair[index],
+            });
+        }
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "src/keep", .data = "previous source tree" });
+        fixture.builder.options.sources_prepared = false;
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        const kept = try fixture.temporary.dir.readFileAlloc(io, "src/keep", allocator, .unlimited);
+        defer allocator.free(kept);
+        try testing.expectEqualStrings("previous source tree", kept);
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "prepare-ran", .{}));
+    }
+}
+
 test "PackageBuilder extracts libblockdev source hard links and forward chains" {
     const allocator = testing.allocator;
     const io = testing.io;
@@ -4502,31 +5277,87 @@ test "PackageBuilder extracts an extensionless source over its matching archive 
     try fixture.temporary.dir.access(io, "pkg/demo/usr/share/demo/font.woff2", .{});
 }
 
-test "PackageBuilder rejects an archive root colliding with another staged source" {
+test "PackageBuilder overlays source archives protect raw and noextract sources in either order" {
     const allocator = testing.allocator;
     const io = testing.io;
-    var fixture = try Fixture.create(allocator,
-        \\pkgname=demo
-        \\pkgver=1
-        \\pkgrel=1
-        \\arch=('any')
-        \\source=('victim.txt' 'collision')
-        \\sha256sums=('SKIP' 'SKIP')
-        \\package() { mkdir -p "$pkgdir"; }
-    , null, null);
-    defer fixture.destroy();
-    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "victim.txt", .data = "victim\n" });
-    const archive_path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "collision" });
-    defer allocator.free(archive_path);
-    try archive.writeFixture(allocator, archive_path, .gzip, &.{
-        .{ .path = "victim.txt", .contents = "archive overwrite\n" },
-    });
-    fixture.builder.options.sources_prepared = false;
-    try fixture.temporary.dir.deleteTree(io, "src");
+    for ([_][]const u8{ "'victim.txt' 'collision'", "'collision' 'victim.txt'" }) |sources| {
+        for ([_][]const u8{ "", "noextract=('victim.txt')" }) |noextract| {
+            for ([_]archive.FixtureEntry{
+                .{ .path = "victim.txt", .contents = "archive overwrite" },
+                .{ .path = "victim.txt", .kind = .directory },
+                .{ .path = "victim.txt/child", .contents = "ancestor collision" },
+                .{ .path = "victim.txt", .link_target = "target" },
+                .{ .path = "victim.txt", .kind = .hard_link, .link_target = "target" },
+            }) |entry| {
+                const pkgbuild = try std.fmt.allocPrint(allocator, "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\nsource=({s})\nsha256sums=('SKIP' 'SKIP')\n{s}\npackage() {{ :; }}\n", .{ sources, noextract });
+                defer allocator.free(pkgbuild);
+                var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+                defer fixture.destroy();
+                try fixture.temporary.dir.writeFile(io, .{ .sub_path = "victim.txt", .data = "victim" });
+                const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "collision" });
+                defer allocator.free(path);
+                try archive.writeFixture(allocator, path, .gzip, &.{ .{ .path = "target", .contents = "payload" }, entry });
+                fixture.builder.options.sources_prepared = false;
+                try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+                const original = try fixture.temporary.dir.readFileAlloc(io, "victim.txt", allocator, .unlimited);
+                defer allocator.free(original);
+                try testing.expectEqualStrings("victim", original);
+                try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+            }
+        }
+    }
+}
 
-    try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
-    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "src", .{}));
-    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+test "PackageBuilder overlays source archives protect standalone outputs in either order" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_][]const u8{ "'payload.gz' 'overlay.tar'", "'overlay.tar' 'payload.gz'" }) |sources| {
+        const pkgbuild = try std.fmt.allocPrint(allocator, "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\nsource=({s})\nsha256sums=('SKIP' 'SKIP')\npackage() {{ :; }}\n", .{sources});
+        defer allocator.free(pkgbuild);
+        var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+        defer fixture.destroy();
+        const standalone = try std.fs.path.join(allocator, &.{ fixture.build_dir, "payload.gz" });
+        defer allocator.free(standalone);
+        const overlay = try std.fs.path.join(allocator, &.{ fixture.build_dir, "overlay.tar" });
+        defer allocator.free(overlay);
+        try archive.writeCompressedFixture(allocator, standalone, .gzip, "standalone");
+        try archive.writeFixture(allocator, overlay, .none, &.{.{ .path = "payload", .contents = "archive" }});
+        fixture.builder.options.sources_prepared = false;
+        try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+    }
+}
+
+test "PackageBuilder overlays source archives protect Git checkout subtrees in either order" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var remote = testing.tmpDir(.{});
+    defer remote.cleanup();
+    const remote_path = try remote.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "init", "-b", "main" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "config", "user.email", "shelly-tests@example.invalid" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "config", "user.name", "Shelly Tests" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "config", "commit.gpgsign", "false" }, remote_path);
+    try remote.dir.writeFile(io, .{ .sub_path = "manifest", .data = "original" });
+    try runTestCommand(allocator, io, &.{ "git", "add", "manifest" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "commit", "-m", "fixture" }, remote_path);
+    const git_source = try std.fmt.allocPrint(allocator, "'repo::git+file://{s}#branch=main'", .{remote_path});
+    defer allocator.free(git_source);
+    for ([_]bool{ false, true }) |git_first| {
+        for ([_][:0]const u8{ "repo/manifest", "repo/new-file", "repo/.git/config" }) |entry_path| {
+            const pkgbuild = try std.fmt.allocPrint(allocator, "pkgname=demo\npkgver=1\npkgrel=1\narch=('any')\nsource=({s} {s})\nsha256sums=('SKIP' 'SKIP')\npackage() {{ :; }}\n", .{ if (git_first) git_source else "'overlay.tar'", if (git_first) "'overlay.tar'" else git_source });
+            defer allocator.free(pkgbuild);
+            var fixture = try Fixture.create(allocator, pkgbuild, null, null);
+            defer fixture.destroy();
+            const overlay = try std.fs.path.join(allocator, &.{ fixture.build_dir, "overlay.tar" });
+            defer allocator.free(overlay);
+            try archive.writeFixture(allocator, overlay, .none, &.{.{ .path = entry_path, .contents = "archive" }});
+            fixture.builder.options.sources_prepared = false;
+            try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
+            try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
+        }
+    }
 }
 
 test "PackageBuilder preserves source archive modification timestamps" {
@@ -5185,7 +6016,7 @@ test "PackageBuilder applies generic patch arrays and propagates dynamic pkgver"
     try testing.expect(std.mem.endsWith(
         u8,
         artifacts[0].path,
-        "scx-scheds-git-1.2.3.r45.gabcdef-2-any.pkg.tar.zst",
+        "scx-scheds-git-1.2.3.r45.gabcdef-1-any.pkg.tar.zst",
     ));
 
     const applied = try fixture.temporary.dir.readFileAlloc(
@@ -5213,10 +6044,316 @@ test "PackageBuilder applies generic patch arrays and propagates dynamic pkgver"
         .unlimited,
     );
     defer allocator.free(pkginfo);
-    try testing.expect(std.mem.indexOf(u8, pkginfo, "pkgver = 1.2.3.r45.gabcdef-2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, pkginfo, "pkgver = 1.2.3.r45.gabcdef-1\n") != null);
     try testing.expect(std.mem.indexOf(u8, pkginfo, "pkgdesc = dynamic scx package\n") != null);
     try testing.expect(std.mem.indexOf(u8, pkginfo, "depend = runtime=1.2.3.r45.gabcdef\n") != null);
     try testing.expect(std.mem.indexOf(u8, pkginfo, "provides = scx-scheds=1.2.3.r45.gabcdef\n") != null);
+}
+
+test "PackageBuilder SRCINFO calculates Git versions and refreshes split metadata" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var remote = std.testing.tmpDir(.{});
+    defer remote.cleanup();
+    const remote_path = try remote.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "init", "-b", "main" }, remote_path);
+    try runTestCommand(allocator, io, &.{ "git", "-c", "user.name=Shelly Tests", "-c", "user.email=tests@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture" }, remote_path);
+    const content = try std.fmt.allocPrint(allocator,
+        \\pkgbase=demo-git
+        \\pkgname=('demo-git' 'demo-docs')
+        \\pkgver=0
+        \\pkgrel=7
+        \\arch=('any')
+        \\source=('repo::git+file://{s}#branch=main')
+        \\sha256sums=('SKIP')
+        \\provides=("demo-api=$pkgver")
+        \\_stamp="$pkgver-$pkgrel"
+        \\verify() {{ printf 'verify\n' >> "$startdir/phases"; }}
+        \\prepare() {{ test -d repo/.git; touch repo/prepared; printf 'prepare\n' >> "$startdir/phases"; }}
+        \\pkgver() {{
+        \\  cd repo
+        \\  test -f prepared
+        \\  printf 'pkgver\n' >> "$startdir/phases"
+        \\  printf 'r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+        \\}}
+        \\build() {{ exit 42; }}
+        \\check() {{ exit 42; }}
+        \\package_demo-git() {{ exit 42; }}
+        \\package_demo-docs() {{
+        \\  depends=("demo-git=$_stamp")
+        \\  exit 42
+        \\}}
+    , .{remote_path});
+    defer allocator.free(content);
+    var fixture = try Fixture.createMany(allocator, content, &.{ "demo-git", "demo-docs" }, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.pkgbuild_path = path;
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    fixture.builder.options.sources_prepared = false;
+    fixture.builder.options.skip_source_pgp_verification = false;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.success);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+    var hash = try process_runner.run(allocator, io, &.{ "git", "rev-parse", "--short=7", "HEAD" }, remote_path, null);
+    defer hash.deinit(allocator);
+    try testing.expectEqual(@as(u8, 0), hash.exit_code);
+    const version = try std.fmt.allocPrint(allocator, "r1.g{s}", .{std.mem.trimEnd(u8, hash.stdout, "\n")});
+    defer allocator.free(version);
+    for ([_][]const u8{ "pkgver = {s}\n", "provides = demo-api={s}\n", "depends = demo-git={s}-1\n" }) |format| {
+        const expected = try std.mem.replaceOwned(u8, allocator, format, "{s}", version);
+        defer allocator.free(expected);
+        try testing.expect(std.mem.indexOf(u8, output.written(), expected) != null);
+    }
+    try testing.expect(std.mem.indexOf(u8, output.written(), "pkgrel = 1\n") != null);
+    const updated = try fixture.temporary.dir.readFileAlloc(io, "PKGBUILD", allocator, .unlimited);
+    defer allocator.free(updated);
+    const expected_file = try builder_mod.pkgver_update.render(allocator, content, version);
+    defer allocator.free(expected_file);
+    try testing.expectEqualStrings(expected_file, updated);
+    const phases = try fixture.temporary.dir.readFileAlloc(io, "phases", allocator, .unlimited);
+    defer allocator.free(phases);
+    try testing.expectEqualStrings("verify\nprepare\npkgver\n", phases);
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "pkg", .{}));
+}
+
+test "PackageBuilder SRCINFO preserves unchanged versions and emits nothing on version preparation failures" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_]struct {
+        version: []const u8 = "1",
+        mode: u32 = 0o644,
+        extra: []const u8 = "",
+        expected_error: ?anyerror = null,
+        noverify: bool = false,
+        cancelled: bool = false,
+    }{
+        .{},
+        .{ .version = "2", .mode = 0o444, .expected_error = error.PkgbuildNotWritable },
+        .{ .version = "invalid-version", .expected_error = error.InvalidPackageVersion },
+        .{ .version = "", .expected_error = error.InvalidPackageVersion },
+        .{ .version = "1\n2", .expected_error = error.InvalidPackageVersion },
+        .{ .extra = "source=('https://example.invalid/source.tar')\n", .expected_error = error.MissingSourceChecksums },
+        .{ .extra = "prepare() { exit 42; }\n", .expected_error = error.StepFailed },
+        .{ .extra = "verify() { exit 42; }\n", .expected_error = error.StepFailed },
+        .{ .extra = "verify() { exit 42; }\n", .noverify = true },
+        .{ .extra = "prepare() { printf '\\n# changed\\n' >> \"$startdir/PKGBUILD\"; }\n", .expected_error = error.ReviewedPkgbuildChanged },
+        .{ .cancelled = true, .expected_error = error.Cancelled },
+    }) |case| {
+        const content = try std.fmt.allocPrint(
+            allocator,
+            "pkgname=demo\npkgver=1\npkgrel=7\narch=('any')\n{s}pkgver() {{ printf '%s' '{s}'; }}\npackage() {{ exit 42; }}\n",
+            .{ case.extra, case.version },
+        );
+        defer allocator.free(content);
+        var fixture = try Fixture.create(allocator, content, null, null);
+        defer fixture.destroy();
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+        try fixture.temporary.dir.setFilePermissions(io, "PKGBUILD", .fromMode(case.mode), .{});
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+        defer allocator.free(path);
+        var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+        defer review.deinit();
+        fixture.builder.options.pkgbuild_path = path;
+        fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+        fixture.builder.options.sources_prepared = false;
+        fixture.builder.options.skip_source_pgp_verification = false;
+        fixture.builder.options.run_verify = !case.noverify;
+        if (case.cancelled) fixture.operation_context.cancel();
+        var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+        defer operation.finish(.success);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        if (case.expected_error) |err| {
+            try testing.expectError(err, fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer));
+            try testing.expectEqual(@as(usize, 0), output.written().len);
+        } else {
+            try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+            try testing.expect(std.mem.indexOf(u8, output.written(), "pkgver = 1\n\tpkgrel = 7\n") != null);
+            const after = try fixture.temporary.dir.readFileAlloc(io, "PKGBUILD", allocator, .unlimited);
+            defer allocator.free(after);
+            try testing.expectEqualStrings(content, after);
+        }
+    }
+}
+
+test "PackageBuilder SRCINFO without pkgver skips source acquisition and lifecycle" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content =
+        \\pkgname=demo
+        \\pkgver=1
+        \\pkgrel=7
+        \\arch=('any')
+        \\source=('https://example.invalid/unreachable.tar')
+        \\sha256sums=('SKIP')
+        \\verify() { exit 42; }
+        \\prepare() { exit 42; }
+        \\build() { exit 42; }
+        \\check() { exit 42; }
+        \\package() { exit 42; }
+    ;
+    var fixture = try Fixture.create(allocator, content, null, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.pkgbuild_path = path;
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    fixture.builder.options.sources_prepared = false;
+    try fixture.temporary.dir.deleteTree(io, "src");
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.success);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "pkgver = 1\n\tpkgrel = 7\n") != null);
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "src", .{}));
+}
+
+test "PackageBuilder writes dynamic pkgver and refreshes all split metadata" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content =
+        \\# Retain this comment and the selected PKGBUILD filename.
+        \\pkgbase=demo
+        \\pkgname=('demo' 'demo-docs')
+        \\pkgver=0 # previous version
+        \\pkgrel=7
+        \\arch=('any')
+        \\provides=("demo-api=$pkgver")
+        \\_stamp="$pkgver-$pkgrel"
+        \\prepare() { printf 'prepare\n' >> phases; }
+        \\pkgver() { printf 'pkgver\n' >> phases; printf 'r2.gabc\n'; }
+        \\build() {
+        \\  test "$_stamp" = r2.gabc-1
+        \\  printf 'build\n' >> phases
+        \\}
+        \\check() { printf 'check\n' >> phases; }
+        \\package_demo() { mkdir -p "$pkgdir/usr/share/demo"; }
+        \\package_demo-docs() { mkdir -p "$pkgdir/usr/share/doc/demo"; }
+    ;
+    var fixture = try Fixture.createMany(allocator, content, &.{ "demo", "demo-docs" }, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "Custom.PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "Custom.PKGBUILD" });
+    defer allocator.free(path);
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.pkgbuild_path = path;
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    fixture.builder.options.review_digest_is_automation = true;
+    const artifacts = try fixture.builder.run();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    const updated = try fixture.temporary.dir.readFileAlloc(io, "Custom.PKGBUILD", allocator, .unlimited);
+    defer allocator.free(updated);
+    const expected = try builder_mod.pkgver_update.render(allocator, content, "r2.gabc");
+    defer allocator.free(expected);
+    try testing.expectEqualStrings(expected, updated);
+    const phases = try fixture.temporary.dir.readFileAlloc(io, "src/phases", allocator, .unlimited);
+    defer allocator.free(phases);
+    try testing.expectEqualStrings("prepare\npkgver\nbuild\ncheck\n", phases);
+    var digest: builder_mod.pkgbuild_review.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(updated, &digest, .{});
+    const expected_hash = try std.fmt.allocPrint(allocator, "pkgbuild_sha256sum = {s}\n", .{std.fmt.bytesToHex(digest, .lower)});
+    defer allocator.free(expected_hash);
+    try testing.expectEqual(@as(usize, 2), artifacts.len);
+    for (artifacts) |artifact| {
+        try testing.expect(std.mem.endsWith(u8, artifact.path, "-r2.gabc-1-any.pkg.tar.zst"));
+        const info = try readPkgInfo(allocator, artifact.path);
+        defer allocator.free(info);
+        try testing.expect(std.mem.indexOf(u8, info, "provides = demo-api=r2.gabc\n") != null);
+        const buildinfo_path = try std.fmt.allocPrint(allocator, "pkg/{s}/.BUILDINFO", .{artifact.package_name});
+        defer allocator.free(buildinfo_path);
+        const buildinfo = try fixture.temporary.dir.readFileAlloc(io, buildinfo_path, allocator, .unlimited);
+        defer allocator.free(buildinfo);
+        try testing.expect(std.mem.indexOf(u8, buildinfo, expected_hash) != null);
+    }
+}
+
+test "PackageBuilder dynamic pkgver leaves unchanged invalid and unwritable inputs intact" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_]struct { output: []const u8, mode: u32 = 0o644, failure: bool = false }{
+        .{ .output = "1" },
+        .{ .output = "2", .mode = 0o444 },
+        .{ .output = "invalid-version", .failure = true },
+        .{ .output = "", .failure = true },
+        .{ .output = "1\n2", .failure = true },
+        .{ .output = "2\r", .failure = true },
+    }) |case| {
+        const content = try std.fmt.allocPrint(
+            allocator,
+            "pkgname=demo\npkgver=1\npkgrel=7\narch=('any')\nprovides=(\"demo-api=$pkgver\")\npkgver() {{ printf '%s' '{s}'; }}\npackage() {{ :; }}\n",
+            .{case.output},
+        );
+        defer allocator.free(content);
+        var fixture = try Fixture.create(allocator, content, null, null);
+        defer fixture.destroy();
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+        try fixture.temporary.dir.setFilePermissions(io, "PKGBUILD", .fromMode(case.mode), .{});
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+        defer allocator.free(path);
+        var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+        defer review.deinit();
+        fixture.builder.options.pkgbuild_path = path;
+        fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+        if (case.failure) {
+            try testing.expectError(error.InvalidPackageVersion, fixture.builder.run());
+        } else {
+            const artifacts = try fixture.builder.run();
+            defer builder_mod.deinitArtifacts(allocator, artifacts);
+            try testing.expect(std.mem.endsWith(u8, artifacts[0].path, "demo-1-7-any.pkg.tar.zst"));
+        }
+        const after = try fixture.temporary.dir.readFileAlloc(io, "PKGBUILD", allocator, .unlimited);
+        defer allocator.free(after);
+        try testing.expectEqualStrings(content, after);
+    }
+}
+
+test "PackageBuilder dynamic pkgver preserves review integrity and survives later build failure" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    for ([_]bool{ true, false }) |change_before_version| {
+        const content = try std.fmt.allocPrint(
+            allocator,
+            "pkgname=demo\npkgver=1\npkgrel=7\narch=('any')\n{s}\npkgver() {{ printf 2; }}\npackage() {{ :; }}\n",
+            .{if (change_before_version)
+                "prepare() { printf '\\n# unreviewed edit\\n' >> \"$startdir/PKGBUILD\"; }"
+            else
+                "build() { exit 42; }"},
+        );
+        defer allocator.free(content);
+        var fixture = try Fixture.create(allocator, content, null, null);
+        defer fixture.destroy();
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+        defer allocator.free(path);
+        var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+        defer review.deinit();
+        fixture.builder.options.pkgbuild_path = path;
+        fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+        try testing.expectError(if (change_before_version) error.ReviewedPkgbuildChanged else error.StepFailed, fixture.builder.run());
+        const after = try fixture.temporary.dir.readFileAlloc(io, "PKGBUILD", allocator, .unlimited);
+        defer allocator.free(after);
+        if (change_before_version) {
+            try testing.expect(std.mem.indexOf(u8, after, "pkgver=1\npkgrel=7\n") != null);
+            try testing.expect(std.mem.endsWith(u8, after, "# unreviewed edit\n"));
+        } else {
+            const expected = try builder_mod.pkgver_update.render(allocator, content, "2");
+            defer allocator.free(expected);
+            try testing.expectEqualStrings(expected, after);
+        }
+    }
 }
 
 test "PackageBuilder rejects invalid dynamic pkgver output" {
@@ -5471,6 +6608,7 @@ test "PackageBuilder keeps shared split builds under the global pkgname" {
 }
 
 test "PackageBuilder preserves selected split metadata in PKGINFO" {
+    if (!@import("../../alpm/backend.zig").libalpm_enabled) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = testing.io;
     const content =
@@ -5547,7 +6685,7 @@ test "PackageBuilder preserves selected split metadata in PKGINFO" {
     const backend_info = try readPkgInfo(allocator, artifacts[1].path);
     defer allocator.free(backend_info);
     try testing.expect(std.mem.indexOf(u8, backend_info, "pkgdesc = Shelly Flatpak backend\n") != null);
-    try testing.expect(std.mem.indexOf(u8, backend_info, "depend = shelly-git=1.1.r4.gsplit-2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, backend_info, "depend = shelly-git=1.1.r4.gsplit-1\n") != null);
     try testing.expect(std.mem.indexOf(u8, backend_info, "depend = flatpak\n") != null);
     try testing.expect(std.mem.indexOf(u8, backend_info, "depend = glibc\n") != null);
     try testing.expect(std.mem.indexOf(u8, backend_info, "group = shared-suite\n") != null);
@@ -5844,6 +6982,21 @@ test "PackageBuilder supports CachyOS generated split package functions" {
         try testing.expect(package_build.has_selected_package_function);
         try testing.expect(package_build.has_complete_split_functions);
     }
+
+    try fixture.temporary.dir.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, testing.io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.success);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "pkgdesc = Headers for the CachyOS kernel kernel\n") != null);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "depends = linux-cachyos\n") != null);
 
     const artifacts = try fixture.builder.BuildPackage();
     defer builder_mod.deinitArtifacts(allocator, artifacts);
@@ -6251,6 +7404,7 @@ const shelly_bin_pkgbuild =
 ;
 
 test "PackageBuilder builds a real package from the repository PKGBUILD-bin" {
+    if (!@import("../../alpm/backend.zig").libalpm_enabled) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = testing.io;
 
@@ -6521,6 +7675,7 @@ test "PackageBuilder wraps lifecycle steps through the sandbox wrapper when enab
         \\build() {
         \\  test "$BUILD_ENV_SANDBOX" = 'configured inside sandbox'
         \\  echo built > build-marker
+        \\  echo cached > "$SRCDEST/cache-marker"
         \\}
         \\package() {
         \\  mkdir -p "$pkgdir"
@@ -6531,15 +7686,29 @@ test "PackageBuilder wraps lifecycle steps through the sandbox wrapper when enab
     , null, null);
     defer fixture.destroy();
 
+    var cache = std.testing.tmpDir(.{});
+    defer cache.cleanup();
+    const cache_root = try cache.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(cache_root);
+    const cache_path = try std.fs.path.join(allocator, &.{ cache_root, "source cache 'quoted'" });
+    defer allocator.free(cache_path);
+    fixture.builder.options.source_destination = cache_path;
+
     // Passthrough stub standing in for the real `__sandbox-exec` entry
-    // point: it records that it ran, then execs the child argv after `--`.
+    // point: verify the separate cache is created and granted write access
+    // before executing the child argv after `--`.
     try fixture.temporary.dir.writeFile(io, .{
         .sub_path = "wrapper-stub.sh",
         .data =
         \\#!/bin/sh
         \\dir=$(dirname "$0")
         \\echo ran > "$dir/wrapper-marker"
-        \\while [ "$1" != "--" ]; do shift; done
+        \\found_cache=false
+        \\while [ "$1" != "--" ]; do
+        \\  if [ "$1" = --rw ] && [ "$2" = "$SRCDEST" ]; then found_cache=true; fi
+        \\  shift 2
+        \\done
+        \\[ "$found_cache" = true ] && [ -d "$SRCDEST" ] || exit 91
         \\shift
         \\exec "$@"
         ,
@@ -6559,6 +7728,7 @@ test "PackageBuilder wraps lifecycle steps through the sandbox wrapper when enab
 
     // The wrapper handled every lifecycle step before bash ran.
     try fixture.temporary.dir.access(io, "wrapper-marker", .{});
+    try cache.dir.access(io, "source cache 'quoted'/cache-marker", .{});
     try fixture.temporary.dir.access(io, "src/build-marker", .{});
     try fixture.temporary.dir.access(io, "pkg/sandbox-demo/package-marker", .{});
 
@@ -6777,4 +7947,185 @@ test "PackageBuilder standalone rejects output symlinks and unsafe stripped name
         try testing.expectError(error.BuildFailed, fixture.builder.BuildPackage());
         try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, ".src.shelly-staging", .{}));
     }
+}
+
+// The dispatch shape in opentelemetry-python-contrib (issue #1981), reduced
+// to an offline package. Both metadata and packaging depend on eval results.
+const generated_split_fixture =
+    \\pkgbase=generated
+    \\pkgname=(generated-one generated-two)
+    \\pkgver=1
+    \\pkgrel=1
+    \\arch=(any)
+    \\package() { exit 91; }
+    \\unset -f package
+    \\package_generated-one() { exit 92; }
+    \\package_generated-two() { exit 93; }
+    \\main() {
+    \\  eval 'emit() { printf "%s\n" "$pkgname" > "$pkgdir/member"; }'
+    \\  for name in "${pkgname[@]}"; do
+    \\    eval "package_${name}() {
+    \\      pkgdesc='Description of ${name}'
+    \\      depends=('dependency-${name}')
+    \\      touch \"\$startdir/packaged\"
+    \\      mkdir -p \"\$pkgdir\"
+    \\      emit
+    \\    }"
+    \\  done
+    \\}
+    \\main
+;
+
+test "PackageBuilder issue 1981 generated functions supply SRCINFO and split artifacts" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const all = [_][]const u8{ "generated-one", "generated-two" };
+    for ([_][]const []const u8{ &all, all[1..] }) |requested| {
+        var fixture = try Fixture.createMany(allocator, generated_split_fixture, requested, null);
+        defer fixture.destroy();
+        try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = generated_split_fixture });
+        const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+        defer allocator.free(path);
+        fixture.builder.options.pkgbuild_path = path;
+        var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, generated_split_fixture, fixture.package_builds);
+        defer review.deinit();
+        fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+        var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+        defer operation.finish(.success);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+        for (all) |name| {
+            const expected = try std.fmt.allocPrint(
+                allocator,
+                "pkgname = {s}\n\tpkgdesc = Description of {s}\n\tdepends = dependency-{s}\n",
+                .{ name, name, name },
+            );
+            defer allocator.free(expected);
+            try testing.expect(std.mem.indexOf(u8, output.written(), expected) != null);
+        }
+        try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "packaged", .{}));
+        const artifacts = try fixture.builder.runWithOperation(&operation);
+        defer builder_mod.deinitArtifacts(allocator, artifacts);
+        try testing.expectEqual(requested.len, artifacts.len);
+        for (requested, artifacts) |name, artifact| {
+            const relative = try std.fmt.allocPrint(allocator, "pkg/{s}/member", .{name});
+            defer allocator.free(relative);
+            const member = try fixture.temporary.dir.readFileAlloc(io, relative, allocator, .unlimited);
+            defer allocator.free(member);
+            try testing.expectEqualStrings(name, std.mem.trimEnd(u8, member, "\n"));
+            const info = try readPkgInfo(allocator, artifact.path);
+            defer allocator.free(info);
+            const dependency = try std.fmt.allocPrint(allocator, "depend = dependency-{s}\n", .{name});
+            defer allocator.free(dependency);
+            try testing.expect(std.mem.indexOf(u8, info, dependency) != null);
+        }
+    }
+}
+
+test "PackageBuilder issue 1981 removed split functions remain missing" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content = generated_split_fixture ++ "\nunset -f package_generated-two\n";
+    var fixture = try Fixture.createMany(allocator, content, &.{ "generated-one", "generated-two" }, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.failed);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try testing.expectError(error.MissingSplitPackageFunction, fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer));
+    try testing.expectEqual(@as(usize, 0), output.written().len);
+}
+
+test "PackageBuilder issue 1981 refreshes generated definitions after pkgver" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        generated_split_fixture ++ "\npkgver() { printf '2\\n'; }\n",
+        "dependency-${name}",
+        "dependency-${name}=$pkgver",
+    );
+    defer allocator.free(content);
+    var fixture = try Fixture.createMany(allocator, content, &.{ "generated-one", "generated-two" }, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.success);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "pkgver = 2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "depends = dependency-generated-one=2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, output.written(), "depends = dependency-generated-two=2\n") != null);
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "packaged", .{}));
+}
+
+test "PackageBuilder issue 1981 generated auxiliary files require review" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const content = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        generated_split_fixture,
+        "depends=('dependency-${name}')",
+        "depends=('dependency-${name}'); install=generated.install",
+    );
+    defer allocator.free(content);
+    var fixture = try Fixture.createMany(allocator, content, &.{ "generated-one", "generated-two" }, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "generated.install", .data = "post_install() { :; }\n" });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    var operation = fixture.operation_context.begin(.{ .backend = .aur, .kind = .build });
+    defer operation.finish(.failed);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try testing.expectError(error.ReviewedPkgbuildChanged, fixture.builder.writeSrcinfoWithOperation(&operation, &output.writer));
+    try testing.expectEqual(@as(usize, 0), output.written().len);
+    try testing.expectError(error.FileNotFound, fixture.temporary.dir.access(io, "packaged", .{}));
+}
+
+test "PackageBuilder issue 1981 executes large generated function snapshots" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    // A single shell argument is limited to about 128 KiB on Linux. Valid
+    // split bases can exceed this once all generated functions are captured.
+    const content = generated_split_fixture ++
+        \\
+        \\printf -v padding '%140000s' ''
+        \\eval "large_helper() { : '$padding'; }"
+        \\unset padding
+    ;
+    var fixture = try Fixture.createMany(allocator, content, &.{"generated-one"}, null);
+    defer fixture.destroy();
+    try fixture.temporary.dir.writeFile(io, .{ .sub_path = "PKGBUILD", .data = content });
+    const path = try std.fs.path.join(allocator, &.{ fixture.build_dir, "PKGBUILD" });
+    defer allocator.free(path);
+    fixture.builder.options.pkgbuild_path = path;
+    var review = try builder_mod.preparePkgbuildReview(allocator, io, fixture.build_dir, content, fixture.package_builds);
+    defer review.deinit();
+    fixture.builder.options.reviewed_pkgbuild_digest = review.digest;
+    const artifacts = try fixture.builder.BuildPackage();
+    defer builder_mod.deinitArtifacts(allocator, artifacts);
+    try testing.expectEqual(@as(usize, 1), artifacts.len);
 }

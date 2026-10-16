@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Shelly-ALPM / Shelly: UI\n"
 "Report-Msgid-Bugs-To: csnyder@seafoam-labs.org\n"
-"POT-Creation-Date: 2026-09-19 13:14-0400\n"
+"POT-Creation-Date: 2026-10-11 18:31-0300\n"
 "PO-Revision-Date: 2026-09-09 12:00+0400\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Azerbaijani <az@li.org>\n"
@@ -60,8 +60,12 @@ msgstr "Tətbiqin məlumatları həmişəlik silinəcək."
 msgid "Confirm"
 msgstr "Təsdiqlə"
 
-msgid "Skip"
-msgstr "Ötür"
+#| msgid "No description available."
+msgid "Permissions unavailable"
+msgstr ""
+
+msgid "Shelly could not read the permissions for this app."
+msgstr ""
 
 msgid "No special permissions requested"
 msgstr "Xüsusi icazələr tələb olunmur"
@@ -107,6 +111,16 @@ msgstr ""
 
 msgid "Review PKGBUILD"
 msgstr "PKGBUILD faylını nəzərdən keçir"
+
+#| msgid "Review PKGBUILD"
+msgid "PKGBUILD"
+msgstr ""
+
+msgid "Retry"
+msgstr ""
+
+msgid "Skip"
+msgstr "Ötür"
 
 msgid "Search..."
 msgstr "Axtarış..."
@@ -159,7 +173,6 @@ msgstr ""
 msgid "e.g. owner/repo or https://..."
 msgstr "məsələn, owner/repo və ya https://..."
 
-#| msgid "Invalid format. Use owner/repo (e.g. seafoam-labs/shelly-alpm)"
 msgid ""
 "Enter the repository as owner/repo, for example seafoam-labs/shelly-alpm."
 msgstr ""
@@ -193,14 +206,12 @@ msgstr "Sinxronlaşdır"
 msgid "Remove"
 msgstr "Sil"
 
-msgid "Information"
-msgstr "Məlumat"
-
-msgid "Preview Pkgbuild"
-msgstr "PKGBUILD önbaxışını göstər"
-
 msgid "Search the AUR by name or keyword"
 msgstr "AUR anbarında ada və ya açar sözə görə axtarış aparın"
+
+#| msgid "Search..."
+msgid "Search By"
+msgstr ""
 
 msgid "Installed Only"
 msgstr "Yalnız quraşdırılanlar"
@@ -208,11 +219,25 @@ msgstr "Yalnız quraşdırılanlar"
 msgid "Show only installed packages"
 msgstr "Yalnız quraşdırılmış paketləri göstər"
 
+msgid "Previous page"
+msgstr ""
+
+msgid "Page 1 of 1"
+msgstr ""
+
+#| msgid "Default page"
+msgid "Next page"
+msgstr ""
+
 msgid "Additional Options"
 msgstr "Əlavə seçimlər"
 
 msgid "Install Selected"
 msgstr "Seçilənləri quraşdır"
+
+#| msgid "Selected"
+msgid "Select"
+msgstr ""
 
 msgid "Name"
 msgstr "Ad"
@@ -223,13 +248,11 @@ msgstr "Səslər"
 msgid "Popularity"
 msgstr "Populyarlıq"
 
-msgid "Search the AUR"
-msgstr "AUR anbarında axtarış apar"
-
-msgid "The AUR has no browsable index. Type a package name to begin."
+msgid "Loading the AUR index"
 msgstr ""
-"AUR anbarında nəzərdən keçirilə bilən indeks yoxdur. Başlamaq üçün paket adı "
-"yazın."
+
+msgid "Powered by Atoll."
+msgstr ""
 
 msgid "Run checks"
 msgstr "Yoxlamaları işə sal"
@@ -242,6 +265,20 @@ msgstr "Təfərrüat panelini gizlət"
 
 msgid "Hide the detail pane on the right"
 msgstr "Sağdakı təfərrüat panelini gizlət"
+
+msgid "Information"
+msgstr "Məlumat"
+
+msgid "Preview Pkgbuild"
+msgstr "PKGBUILD önbaxışını göstər"
+
+msgid "Search the AUR"
+msgstr "AUR anbarında axtarış apar"
+
+msgid "The AUR has no browsable index. Type a package name to begin."
+msgstr ""
+"AUR anbarında nəzərdən keçirilə bilən indeks yoxdur. Başlamaq üçün paket adı "
+"yazın."
 
 msgid "Install a local Flatpak"
 msgstr "Yerli Flatpak quraşdır"
@@ -366,6 +403,10 @@ msgstr "Haqqında"
 
 msgid "Shelly"
 msgstr "Shelly"
+
+#| msgid "Optional Depends"
+msgid "Install Optional Deps"
+msgstr ""
 
 msgid "Reinstall"
 msgstr "Yenidən quraşdır"
@@ -612,6 +653,9 @@ msgstr "Təsdiqsiz"
 msgid "Enable Shelly Search"
 msgstr "Shelly axtarışını aktivləşdir"
 
+msgid "Enable Atoll Powered AUR"
+msgstr ""
+
 msgid "AppImage Install Path"
 msgstr "AppImage quraşdırma yolu"
 
@@ -663,7 +707,6 @@ msgstr "Yeniləmələr yoxlanılır…"
 msgid "Your system is up to date"
 msgstr "Sisteminiz ən son vəziyyətdədir"
 
-#| msgid "Could not check for updates"
 msgid "Could not check for updates."
 msgstr ""
 
@@ -795,20 +838,30 @@ msgstr "Davam et"
 msgid "Start Shelly"
 msgstr "Shelly tətbiqini başlat"
 
-msgid "Filesystem"
-msgstr "Fayl sistemi"
+#| msgid "System bus"
+msgid "System files"
+msgstr ""
+
+msgid "Other folders"
+msgstr ""
+
+msgid "Running services"
+msgstr ""
+
+msgid "Other apps' data"
+msgstr ""
+
+msgid "Home folder"
+msgstr ""
+
+msgid "User folders"
+msgstr ""
+
+msgid "Persistent files"
+msgstr ""
 
 msgid "Devices"
 msgstr "Qurğular"
-
-msgid "Sockets"
-msgstr "Soketlər"
-
-msgid "Shared"
-msgstr "Paylaşılanlar"
-
-msgid "Environment"
-msgstr "Mühit"
 
 msgid "Session bus"
 msgstr "Seans şini"
@@ -816,8 +869,39 @@ msgstr "Seans şini"
 msgid "System bus"
 msgstr "Sistem şini"
 
+#| msgid "Network"
+msgid "Network access"
+msgstr ""
+
+msgid "Display server"
+msgstr ""
+
+msgid "Sandbox features"
+msgstr ""
+
+msgid "Environment"
+msgstr "Mühit"
+
+msgid "Sound"
+msgstr ""
+
+msgid "Printing"
+msgstr ""
+
+msgid "Inter-process communication"
+msgstr ""
+
 msgid "Other"
 msgstr "Digər"
+
+msgid "No network access"
+msgstr ""
+
+msgid "No device access"
+msgstr ""
+
+msgid "No access to system files"
+msgstr ""
 
 msgid "Review PKGBUILD changes for"
 msgstr "Bu paket üçün PKGBUILD dəyişikliklərini nəzərdən keçir"
@@ -852,7 +936,6 @@ msgstr "paket"
 msgid "to"
 msgstr "üçün"
 
-#| msgid "remove"
 msgid "removed size"
 msgstr ""
 
@@ -862,7 +945,25 @@ msgstr "endirmə"
 msgid "net"
 msgstr "xalis"
 
+msgid "Scanning PKGBUILD…"
+msgstr ""
+
+#| msgid "No description available."
+msgid "Security scan unavailable."
+msgstr ""
+
 msgid "Could not load the PKGBUILD preview."
+msgstr ""
+
+msgid ""
+"PKGBUILD changed. Close and reopen the preview to scan the current version."
+msgstr ""
+
+#| msgid "Flatpak files"
+msgid "No related files."
+msgstr ""
+
+msgid "Previous"
 msgstr ""
 
 msgid "Dismiss"
@@ -889,13 +990,9 @@ msgstr "Yeniləmə mövcuddur"
 msgid "Version ?"
 msgstr "Versiya ?"
 
-#| msgid "Invalid URL. Must start with http:// or https://"
 msgid "Enter a download URL beginning with http:// or https://."
 msgstr ""
 
-#| msgid ""
-#| "Invalid Forgejo URL. Use http(s)://host/owner/repo or http(s)://host/"
-#| "owner/repo/releases"
 msgid ""
 "Enter a Forgejo repository URL as http(s)://host/owner/repo or http(s)://"
 "host/owner/repo/releases."
@@ -907,7 +1004,6 @@ msgstr "AppImage faylı seçin"
 msgid "AppImage files"
 msgstr "AppImage faylları"
 
-#| msgid "Only .AppImage files can be installed"
 msgid "Only.AppImage files can be installed"
 msgstr ""
 
@@ -967,6 +1063,61 @@ msgstr "Mühit dəyişiklikləriniz yadda saxlanılmayıb."
 msgid "Discard"
 msgstr "İmtina et"
 
+msgid "No packages found"
+msgstr "Paketlər tapılmadı"
+
+msgid "Try a shorter or more general keyword."
+msgstr "Daha qısa və ya daha ümumi açar sözlə cəhd edin."
+
+msgid "Could not reach Atoll"
+msgstr ""
+
+msgid "Check your connection and try again."
+msgstr "Şəbəkəyə qoşulmanızı yoxlayıb yenidən cəhd edin."
+
+msgid "Flagged out of date"
+msgstr "Köhnəlmiş kimi işarələnib"
+
+msgid "Installed"
+msgstr "Quraşdırılıb"
+
+msgid "Remove Selected"
+msgstr "Seçilənləri sil"
+
+msgid "Select one or more packages"
+msgstr "Bir və ya bir neçə paket seçin"
+
+msgid "Package(s)"
+msgstr "Paketlər"
+
+msgid "Page"
+msgstr ""
+
+msgid "of"
+msgstr "/"
+
+msgid "Remove Packages"
+msgstr "Paketləri sil"
+
+msgid "Remove the selected AUR packages?"
+msgstr "Seçilmiş AUR paketləri silinsin?"
+
+msgid "Build from AUR"
+msgstr "AUR mənbəyindən qur"
+
+msgid "Build and install the selected packages? This may take a while."
+msgstr ""
+"Seçilmiş paketlər qurulsun və quraşdırılsın? Bu, bir qədər vaxt apara bilər."
+
+msgid "Build"
+msgstr "Qur"
+
+msgid "Installing AUR packages"
+msgstr "AUR paketləri quraşdırılır"
+
+msgid "Removing AUR packages"
+msgstr "AUR paketləri silinir"
+
 msgid "Maintainer"
 msgstr "Baxıcı"
 
@@ -999,55 +1150,8 @@ msgstr ""
 "AUR anbarında nəzərdən keçirilə bilən indeks yoxdur. Başlamaq üçün paket adı "
 "yazın."
 
-msgid "No packages found"
-msgstr "Paketlər tapılmadı"
-
-msgid "Try a shorter or more general keyword."
-msgstr "Daha qısa və ya daha ümumi açar sözlə cəhd edin."
-
-#| msgid "Could not reach the AUR"
 msgid "Could not search the configured AUR service."
 msgstr ""
-
-msgid "Check your connection and try again."
-msgstr "Şəbəkəyə qoşulmanızı yoxlayıb yenidən cəhd edin."
-
-msgid "Flagged out of date"
-msgstr "Köhnəlmiş kimi işarələnib"
-
-msgid "Installed"
-msgstr "Quraşdırılıb"
-
-msgid "Remove Selected"
-msgstr "Seçilənləri sil"
-
-msgid "Select one or more packages"
-msgstr "Bir və ya bir neçə paket seçin"
-
-msgid "Package(s)"
-msgstr "Paketlər"
-
-msgid "Remove Packages"
-msgstr "Paketləri sil"
-
-msgid "Remove the selected AUR packages?"
-msgstr "Seçilmiş AUR paketləri silinsin?"
-
-msgid "Build from AUR"
-msgstr "AUR mənbəyindən qur"
-
-msgid "Build and install the selected packages? This may take a while."
-msgstr ""
-"Seçilmiş paketlər qurulsun və quraşdırılsın? Bu, bir qədər vaxt apara bilər."
-
-msgid "Build"
-msgstr "Qur"
-
-msgid "Installing AUR packages"
-msgstr "AUR paketləri quraşdırılır"
-
-msgid "Removing AUR packages"
-msgstr "AUR paketləri silinir"
 
 msgid "Choose a Flatpak file"
 msgstr "Flatpak faylı seçin"
@@ -1055,14 +1159,12 @@ msgstr "Flatpak faylı seçin"
 msgid "Flatpak files"
 msgstr "Flatpak faylları"
 
-#| msgid "Unsupported file type. Choose a .flatpak or .flatpakref file."
 msgid "Unsupported file type. Choose a.flatpak or.flatpakref file."
 msgstr ""
 
 msgid "Installing local flatpak"
 msgstr "Yerli Flatpak quraşdırılır"
 
-#| msgid "Install the selected packages?"
 msgid "Could not install the selected packages."
 msgstr ""
 
@@ -1129,11 +1231,9 @@ msgstr "Endir"
 msgid "No description available."
 msgstr "Təsvir yoxdur."
 
-#| msgid "Unable to load Flatpak applications."
 msgid "Could not load this application screenshot."
 msgstr ""
 
-#| msgid "Unable to download screenshot"
 msgid "Could not download this application screenshot."
 msgstr ""
 
@@ -1172,11 +1272,9 @@ msgid ""
 "other applications and try again."
 msgstr ""
 
-#| msgid "Unable to load Flatpak applications."
 msgid "Could not start loading Flatpak applications."
 msgstr ""
 
-#| msgid "Unable to load Flatpak applications."
 msgid "Could not load Flatpak applications from the selected remote."
 msgstr ""
 
@@ -1297,6 +1395,13 @@ msgstr "Paket birbaşa quraşdırılmış kimi işarələnir"
 msgid "Making Package Dependency"
 msgstr "Paket asılılıq kimi işarələnir"
 
+msgid "Select Optional Dependencies to Install"
+msgstr ""
+
+#| msgid "Installing packages"
+msgid "Installing optional dependencies"
+msgstr ""
+
 msgid "Package is already installed"
 msgstr "Paket artıq quraşdırılıb"
 
@@ -1340,7 +1445,6 @@ msgstr ""
 "Standart anbarlarda, AUR və Flatpak mənbələrində eyni anda axtarış aparın. "
 "Başlamaq üçün ad yazın."
 
-#| msgid "Could not reach the AUR"
 msgid "Could not search the selected sources."
 msgstr ""
 
@@ -1373,19 +1477,15 @@ msgstr "Flatpak dəstəyi quraşdırılır"
 msgid "Installing AppImage support"
 msgstr "AppImage dəstəyi quraşdırılır"
 
-#| msgid "Installing Flatpak support"
 msgid "Could not start installing Flatpak support."
 msgstr ""
 
-#| msgid "Installing AppImage support"
 msgid "Could not start installing AppImage support."
 msgstr ""
 
-#| msgid "Installing Flatpak support"
 msgid "Could not install Flatpak support."
 msgstr ""
 
-#| msgid "Installing AppImage support"
 msgid "Could not install AppImage support."
 msgstr ""
 
@@ -1401,7 +1501,6 @@ msgstr "Dəyişiklik jurnalında qeydlər tapılmadı"
 msgid "No details for this release"
 msgstr "Bu buraxılış üçün təfərrüatlar yoxdur"
 
-#| msgid "Could not check for updates"
 msgid "Could not load the release notes."
 msgstr ""
 
@@ -1437,7 +1536,6 @@ msgstr ""
 msgid "Systemd startup service added."
 msgstr "systemd başlatma xidməti əlavə olundu."
 
-#| msgid "Tray disabled, but autostart service remains"
 msgid "Could not disable the tray autostart service."
 msgstr ""
 
@@ -1507,19 +1605,15 @@ msgstr "Gözləyir"
 msgid "Working"
 msgstr "İşləyir"
 
-#| msgid "Upgrade"
 msgid "Upgraded"
 msgstr ""
 
-#| msgid "Downgrading"
 msgid "Downgraded"
 msgstr ""
 
-#| msgid "Reinstall"
 msgid "Reinstalled"
 msgstr ""
 
-#| msgid "Remove"
 msgid "Removed"
 msgstr ""
 
@@ -1535,7 +1629,6 @@ msgstr ""
 msgid "Cancelled"
 msgstr "Ləğv edildi"
 
-#| msgid "Failed to start operation."
 msgid "Could not start the requested operation."
 msgstr ""
 
@@ -1587,7 +1680,6 @@ msgstr "Əməliyyat tamamlandı"
 msgid "Operation failed"
 msgstr "Əməliyyat uğursuz oldu"
 
-#| msgid "Operation failed"
 msgid "Operation cancelled"
 msgstr ""
 
@@ -1597,7 +1689,6 @@ msgstr "Bitdi"
 msgid "exit"
 msgstr "çıx"
 
-#| msgid "The operation was cancelled."
 msgid "Operation cancelled."
 msgstr ""
 
@@ -1629,9 +1720,6 @@ msgstr "AUR paketlərinin yenilənməsi"
 
 msgid "Update this package"
 msgstr "Bu paketi yenilə"
-
-msgid "of"
-msgstr "/"
 
 msgid "updates included"
 msgstr "yeniləmə daxildir"
@@ -1673,8 +1761,17 @@ msgstr ""
 msgid "Installing Flatpak and AppImage support"
 msgstr "Flatpak və AppImage dəstəyi quraşdırılır"
 
+msgid "Main menu"
+msgstr ""
+
 msgid "Settings"
 msgstr "Parametrlər"
+
+msgid "Expand sidebar"
+msgstr ""
+
+msgid "Collapse sidebar"
+msgstr ""
 
 msgid "Package"
 msgstr "Paket"

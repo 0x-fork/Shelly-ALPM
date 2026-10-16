@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const bindings = @import("Shelly_Ui_Gtk");
 const gtk = bindings.gtk;
 const glib = bindings.glib;
@@ -6,6 +7,7 @@ const gio = bindings.gio;
 const gobject = bindings.gobject;
 const support = @import("support.zig");
 const translations = @import("../helpers/translations.zig");
+const a11y = @import("../helpers/a11y.zig");
 const ConfirmDialog = @import("../dialog/page/yn_dialog.zig").ConfirmDialog;
 const AurWarningDialog = @import("../dialog/page/aur_warning.zig").AurWarningDialog;
 const ShellyWindow = @import("../shelly_window.zig").ShellyWindow;
@@ -281,10 +283,10 @@ pub const WelcomePage = extern struct {
         }
 
         svc.set(updated) catch |err| {
-            std.log.err("Could not apply the setup settings. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+            std.log.err("Could not apply the setup settings. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
         };
         svc.save() catch |err| {
-            std.log.err("Could not save the setup settings to the configured file. {0s} Setup preferences were not saved.\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+            std.log.err("Could not save the setup settings to the configured file. {0s} Setup preferences were not saved.\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
         };
 
         if (win) |w| {
@@ -416,11 +418,11 @@ pub const WelcomePage = extern struct {
         if (ctx.flatpak) updated.FlatPackEnabled = true;
         if (ctx.appimage) updated.AppImageEnabled = true;
         svc.set(updated) catch |err| {
-            std.log.err("Support packages were installed, but the installed support could not be enabled. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+            std.log.err("Support packages were installed, but the installed support could not be enabled. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
             return;
         };
         svc.save() catch |err| {
-            std.log.err("Support packages were installed, but the setting to enable the installed support could not be saved. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+            std.log.err("Support packages were installed, but the setting to enable the installed support could not be saved. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
             return;
         };
         ctx.window.applyConfig();
@@ -444,6 +446,11 @@ pub const WelcomePage = extern struct {
             p.page_appearance.as(gtk.Widget),
         };
         gtk.Stack.setVisibleChild(p.welcome_stack, pages[step]);
+        // Nothing else moves focus, so an AT hears the page change as silence.
+        // Focusing a control in the new page both announces it and gives the user
+        // a position to act from; the page's own group name is what makes the move
+        // legible rather than merely audible.
+        _ = a11y.focusFirst(pages[step]);
 
         gtk.Widget.setSensitive(p.btn_back.as(gtk.Widget), @intFromBool(step > 0));
 

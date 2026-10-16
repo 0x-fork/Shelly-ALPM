@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const HttpClient = @import("ShellyHttp");
 const bindings = @import("Shelly_Ui_Gtk");
 const gtk = bindings.gtk;
@@ -11,7 +12,7 @@ const runtime = @import("services/runtime.zig");
 const translations = @import("helpers/translations.zig");
 const deep_link = @import("helpers/deep_link.zig");
 const tray_service = @import("services/tray_service.zig");
-const options = @import("options");
+const features = @import("services/build_features.zig");
 const IconDownloadService = @import("services/icon_fetcher.zig").downloadIconsInBackground;
 
 var did_activate: bool = false;
@@ -20,6 +21,8 @@ var app_id_buffer: [deep_link.max_app_id_len + 1]u8 = undefined;
 var requested_app_id: ?[:0]const u8 = null;
 var app_path_buffer: [deep_link.max_file_path_len + 1]u8 = undefined;
 var requested_app_path: ?[:0]const u8 = null;
+var appimage_path_buffer: [deep_link.max_file_path_len + 1]u8 = undefined;
+var requested_appimage_path: ?[:0]const u8 = null;
 
 pub fn main(init: std.process.Init) void {
     runtime.io = init.io;
@@ -29,8 +32,8 @@ pub fn main(init: std.process.Init) void {
     if (!translations.init()) {
         std.log.warn("Could not initialize translations. Shelly may display untranslated text.", .{});
     }
-    if (!options.skip_background_services) {
-        IconDownloadService(std.heap.c_allocator, runtime.io);
+    if (features.builtWithBackgroundServices) {
+        IconDownloadService(std.heap.c_allocator, runtime.io, shellyIconsEnabled());
     }
 
     const app = gtk.Application.new("com.shellyorg.shelly", .{
@@ -62,6 +65,10 @@ fn commandLine(
     cmdline: *gio.ApplicationCommandLine,
     _: ?*anyopaque,
 ) callconv(.c) c_int {
+    requested_page = null;
+    requested_app_id = null;
+    requested_app_path = null;
+    requested_appimage_path = null;
     var argc: c_int = 0;
     const argv = gio.ApplicationCommandLine.getArguments(cmdline, &argc);
     const argc_usize = @as(usize, @intCast(argc));
@@ -94,10 +101,16 @@ fn commandLine(
         if (deep_link.extractLocalFlatpakFile(arg, &app_path_buffer)) |app_path| {
             requested_app_path = app_path;
         }
+
+        if (deep_link.extractLocalAppImageFile(arg, &appimage_path_buffer)) |appimage_path| {
+            requested_appimage_path = appimage_path;
+        }
     }
 
     if (requested_app_path) |app_path| {
         runtime.queueLocalFlatpakPath(app_path);
+    } else if (requested_appimage_path) |appimage_path| {
+        runtime.queueLocalAppImagePath(appimage_path);
     } else if (requested_app_id) |id| {
         runtime.queueFlatpakApp(id);
     } else if (requested_page) |page| {
@@ -116,11 +129,17 @@ fn dispatchPendingNavigation(window: *ShellyWindow) void {
         .page => |target| window.navigateTo(target),
         .flatpak_app => |app| window.openFlatpakApp(app.id()),
         .local_flatpak_file => |file| window.openFlatpakLocalFile(file.path()),
+        .local_appimage_file => |file| window.openAppImageLocalFile(file.path()),
     };
 
     if (!navigated) {
         std.log.warn("Could not open the requested page because it is disabled or unavailable. Enable the corresponding support in settings or choose another page.", .{});
     }
+}
+
+fn shellyIconsEnabled() bool {
+    _ = runtime.setupConfig(std.heap.c_allocator) catch return true;
+    return runtime.shellyIconsEnabled();
 }
 
 fn tryStopTray(io: std.Io, alloc: std.mem.Allocator) void {
@@ -174,12 +193,12 @@ fn activate(app: *gtk.Application, _: ?*anyopaque) callconv(.c) void {
     }
 
     _ = runtime.setupConfig(std.heap.c_allocator) catch |err| {
-        std.log.warn("Could not open the settings service. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+        std.log.warn("Could not open the settings service. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
     };
 
     if (runtime.config) |svc| {
         const cfg = svc.get() catch |err| {
-            std.log.warn("Could not load settings from the configured file. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+            std.log.warn("Could not load settings from the configured file. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
             return;
         };
 
@@ -193,7 +212,7 @@ fn activate(app: *gtk.Application, _: ?*anyopaque) callconv(.c) void {
         }
     }
 
-    if (!options.skip_background_services) tryStartTray(runtime.io, std.heap.c_allocator);
+    if (features.builtWithBackgroundServices) tryStartTray(runtime.io, std.heap.c_allocator);
 
     setupGnomeThemePreference();
 
@@ -252,6 +271,7 @@ test {
     _ = @import("services/ui_config_resolver.zig");
     _ = @import("services/shelly_cli.zig");
     _ = @import("services/tray_service.zig");
+    _ = @import("helpers/a11y.zig");
     _ = @import("g_objects/appstream_app_object.zig");
     _ = @import("helpers/custom_ui_comps/carousel.zig");
     _ = @import("helpers/custom_ui_comps/carousel_indicator_dots.zig");

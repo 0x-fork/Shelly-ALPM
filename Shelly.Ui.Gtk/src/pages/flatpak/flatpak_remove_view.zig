@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const bindings = @import("Shelly_Ui_Gtk");
 const gtk = bindings.gtk;
 const gio = bindings.gio;
@@ -16,6 +17,7 @@ const ShellyWindow = @import("../../shelly_window.zig").ShellyWindow;
 const ShellyCommands = @import("../../services/shelly_operation.zig").ShellyCommands;
 const FlatpakRemoveDialog = @import("../../dialog/page/flatpak_remove_dialog.zig").FlatpakRemoveDialog;
 const translations = @import("../../helpers/translations.zig");
+const a11y = @import("../../helpers/a11y.zig");
 
 pub const FlatpakRemoveView = extern struct {
     parent_instance: Parent,
@@ -173,8 +175,12 @@ pub const FlatpakRemoveView = extern struct {
         const icon = gobject.ext.cast(gtk.Image, gtk.Grid.getChildAt(grid, 0, 0) orelse return) orelse return;
         const name_label = gobject.ext.cast(gtk.Label, gtk.Grid.getChildAt(grid, 1, 0) orelse return) orelse return;
         const info_label = gobject.ext.cast(gtk.Label, gtk.Grid.getChildAt(grid, 1, 1) orelse return) orelse return;
+        const remove_button = gobject.ext.cast(gtk.Button, gtk.Grid.getChildAt(grid, 3, 0) orelse return) orelse return;
 
         gtk.Label.setLabel(name_label, pkg.getName());
+        // The button's only content is a trash icon, and the factory reuses this
+        // row across apps, so its name is the current row's app name.
+        a11y.setName(remove_button.as(gtk.Widget), pkg.getName());
 
         var buf: [64]u8 = undefined;
         const size_text = sizeconverter.SizeConverter.convert_null_term(&buf, pkg.getInstalledSize());
@@ -342,7 +348,7 @@ pub const FlatpakRemoveView = extern struct {
 
         const cli = ShellyCli{ .allocator = alloc, .io = threaded.io() };
         const parsed = cli.getInstalledFlatpaks() catch |err| {
-            std.debug.print("Could not load installed Flatpaks. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+            std.debug.print("Could not load installed Flatpaks. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
             postResult(page, &.{}, arena_ptr, generation);
             return;
         };

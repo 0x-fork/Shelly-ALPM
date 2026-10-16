@@ -1,5 +1,6 @@
 const std = @import("std");
-const Zigalpm = @import("Zigalpm");
+const diagnostics = @import("diagnostics");
+const PackageManager = @import("PackageManager");
 const test_support = @import("test_support.zig");
 const output = @import("../output/config.zig");
 const standard_single_pane = @import("../output/standard_single_pane.zig");
@@ -28,15 +29,15 @@ const Options = struct {
     aur_cache: bool = false,
     aur_cache_root: ?[]const u8 = null,
     plan_only: bool = false,
-    cache_plan: ?*const Zigalpm.alpm.CacheRemovalPlan = null,
-    aur_cache_plans: ?[]const Zigalpm.alpm.CacheRemovalPlan = null,
+    cache_plan: ?*const PackageManager.Manager.CacheRemovalPlan = null,
+    aur_cache_plans: ?[]const aur_cache.RemovalPlan = null,
 };
 
 const Result = struct {
     targets: []const [:0]const u8 = &.{},
     owns_targets: bool = false,
-    cache_plan: ?Zigalpm.alpm.CacheRemovalPlan = null,
-    aur_cache_plans: []Zigalpm.alpm.CacheRemovalPlan = &.{},
+    cache_plan: ?PackageManager.Manager.CacheRemovalPlan = null,
+    aur_cache_plans: []aur_cache.RemovalPlan = &.{},
 
     fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         if (self.owns_targets) {
@@ -53,82 +54,86 @@ const Real = struct {
     pub fn run(
         _: Real,
         context: *runtime.RuntimeContext,
-        operation_context: *Zigalpm.OperationContext,
+        operation_context: *PackageManager.OperationContext,
         backend: Backend,
         options: Options,
     ) !Result {
         switch (backend) {
             .standard => {
-                const manager = try Zigalpm.AlpmManager.init(context.allocator, context.environ, .{
-                    .use_root = true,
-                    .operation_context = operation_context,
-                });
-                defer manager.deinit();
-                manager.setOperationContext(operation_context);
-                defer manager.setOperationContext(null);
-                const planning = options.plan_only or options.dry_run;
+                // Release database handles before clearing Shelly's cached metadata.
+                var result = packages: {
+                    const manager = try PackageManager.Manager.init(context.allocator, context.environ, .{
+                        .config_path = context.config_path,
+                        .use_root = true,
+                        .operation_context = operation_context,
+                    });
+                    defer manager.deinit();
+                    manager.setOperationContext(operation_context);
+                    defer manager.setOperationContext(null);
+                    const planning = options.plan_only or options.dry_run;
 
-                if (!planning and options.aur_cache) {
-                    const plans = options.aur_cache_plans orelse return PurifyError.CachePlanMissing;
-                    try aur_cache.execute(context, operation_context, plans);
-                }
-
-                if (!planning and options.cache_versions != null) {
-                    const cache_plan = options.cache_plan orelse return PurifyError.CachePlanMissing;
-                    var cache_manager = Zigalpm.alpm.CacheManager.init(
-                        context.allocator,
-                        context.io,
-                        .{
-                            .cache_directory = cache_plan.cache_directory,
-                            .handle = manager.handle,
-                        },
-                    );
-                    cache_manager.setOperationContext(operation_context);
-                    _ = try cache_manager.execute_cache_removal_plan(cache_plan);
-                }
-
-                var result: Result = .{
-                    .targets = try manager.purify(planning, options.orphans, true),
-                    .owns_targets = true,
-                };
-                errdefer result.deinit(context.allocator);
-
-                if (planning) {
-                    if (options.cache_versions) |keep| {
-                        var cache_manager = Zigalpm.alpm.CacheManager.init(
+                    if (!planning and options.cache_versions != null) {
+                        const cache_plan = options.cache_plan orelse return PurifyError.CachePlanMissing;
+                        var cache_manager = PackageManager.Manager.CacheManager.init(
                             context.allocator,
                             context.io,
                             .{
-                                .cache_directory = manager.config.cache_directory,
-                                .handle = manager.handle,
+                                .cache_directory = cache_plan.cache_directory,
+                                .manager = manager,
                             },
                         );
                         cache_manager.setOperationContext(operation_context);
-                        var cache_plan = try cache_manager.plan_cache_cleanup(.{
-                            .keep = keep,
-                            .dry_run = options.dry_run,
-                        });
-                        errdefer cache_plan.deinit(context.allocator);
-                        try appendCacheTargets(context.allocator, &result, &cache_plan, "cache");
-                        result.cache_plan = cache_plan;
+                        _ = try cache_manager.execute_cache_removal_plan(cache_plan);
                     }
-                    if (options.aur_cache) {
-                        const root = options.aur_cache_root orelse try xdg.shellyCache(context, &.{});
-                        result.aur_cache_plans = try aur_cache.plan(context, operation_context, root, options.dry_run);
-                        for (result.aur_cache_plans) |*cache_plan|
-                            try appendCacheTargets(context.allocator, &result, cache_plan, "aur-cache");
+
+                    var package_result: Result = .{
+                        .targets = try manager.purify(planning, options.orphans, true),
+                        .owns_targets = true,
+                    };
+                    errdefer package_result.deinit(context.allocator);
+
+                    if (planning) {
+                        if (options.cache_versions) |keep| {
+                            var cache_manager = PackageManager.Manager.CacheManager.init(
+                                context.allocator,
+                                context.io,
+                                .{
+                                    .cache_directory = manager.config.cache_directory,
+                                    .manager = manager,
+                                },
+                            );
+                            cache_manager.setOperationContext(operation_context);
+                            var cache_plan = try cache_manager.plan_cache_cleanup(.{
+                                .keep = keep,
+                                .dry_run = options.dry_run,
+                            });
+                            errdefer cache_plan.deinit(context.allocator);
+                            try appendCacheTargets(context.allocator, &package_result, &cache_plan, "cache");
+                            package_result.cache_plan = cache_plan;
+                        }
+                        if (options.aur_cache) {
+                            const root = options.aur_cache_root orelse try xdg.shellyCache(context, &.{});
+                            package_result.aur_cache_plans = try aur_cache.plan(context, operation_context, root, options.dry_run);
+                            try appendAurCacheTargets(context.allocator, &package_result);
+                        }
                     }
+                    break :packages package_result;
+                };
+                errdefer result.deinit(context.allocator);
+                if (!options.plan_only and !options.dry_run and options.aur_cache) {
+                    const plans = options.aur_cache_plans orelse return PurifyError.CachePlanMissing;
+                    try aur_cache.execute(context, operation_context, plans);
                 }
                 return result;
             },
             .flatpak => {
-                var manager = Zigalpm.FlatpakManager{ .allocator = context.allocator, .io = context.io };
+                var manager = PackageManager.FlatpakManager{ .allocator = context.allocator, .io = context.io };
                 defer manager.deinit();
                 try manager.setOperationContext(operation_context);
                 defer manager.setOperationContext(null) catch {};
                 if (options.plan_only or options.dry_run) {
                     const dependencies = try manager.list_unused_dependencies();
-                    defer Zigalpm.flatpak.UnusedDependency.deinitSlice(context.allocator, dependencies);
+                    defer PackageManager.flatpak.UnusedDependency.deinitSlice(context.allocator, dependencies);
                     const targets = try context.allocator.alloc([:0]const u8, dependencies.len);
                     var initialized: usize = 0;
                     errdefer {
@@ -162,7 +167,7 @@ pub fn dispatch(
         const arguments = try elevatedPurifyArguments(context, invocation);
         defer context.allocator.free(arguments);
         const elevated_exit = elevation.relaunchIfNeeded(context, arguments) catch |err| {
-            try context.stderr.print("Could not obtain administrator privileges for unneeded-package removal. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+            try context.stderr.print("Could not obtain administrator privileges for unneeded-package removal. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
             return 1;
         };
         if (elevated_exit) |exit_code| return exit_code;
@@ -217,7 +222,7 @@ fn buildPlan(
     options: Options,
     runner: anytype,
 ) anyerror!Result {
-    var operation_context = Zigalpm.OperationContext.init(context.allocator, context.io);
+    var operation_context = PackageManager.OperationContext.init(context.allocator, context.io);
     defer operation_context.deinit();
     var plan_options = options;
     plan_options.plan_only = true;
@@ -258,7 +263,7 @@ fn confirmPurify(context: *runtime.RuntimeContext) !bool {
 }
 
 fn confirmPurifyUi(context: *runtime.RuntimeContext, backend: Backend) !bool {
-    var operation_context = Zigalpm.OperationContext.init(context.allocator, context.io);
+    var operation_context = PackageManager.OperationContext.init(context.allocator, context.io);
     defer operation_context.deinit();
     var question_responder: ui_operation.QuestionResponder = .{
         .context = context,
@@ -315,7 +320,7 @@ fn executeStandard(
         pub fn run(
             self: *@This(),
             runtime_context: *runtime.RuntimeContext,
-            operation_context: *Zigalpm.OperationContext,
+            operation_context: *PackageManager.OperationContext,
             _: *const parser.Invocation,
         ) !void {
             self.result = try self.runner.run(
@@ -349,7 +354,7 @@ fn executeQuiet(
     options: Options,
     runner: anytype,
 ) anyerror!u8 {
-    var operation_context = Zigalpm.OperationContext.init(context.allocator, context.io);
+    var operation_context = PackageManager.OperationContext.init(context.allocator, context.io);
     context.attachTransactionLog(&operation_context);
     defer operation_context.deinit();
     if (invocation.globals.no_confirm) {
@@ -363,7 +368,7 @@ fn executeQuiet(
         backend,
         options,
     ) catch |err| {
-        try context.stderr.print("Could not remove unneeded packages. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+        try context.stderr.print("Could not remove unneeded packages. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
         return 1;
     };
     defer result.deinit(context.allocator);
@@ -377,7 +382,7 @@ fn executeUi(
     options: Options,
     runner: anytype,
 ) anyerror!u8 {
-    var operation_context = Zigalpm.OperationContext.init(context.allocator, context.io);
+    var operation_context = PackageManager.OperationContext.init(context.allocator, context.io);
     context.attachTransactionLog(&operation_context);
     defer operation_context.deinit();
     var question_responder: ui_operation.QuestionResponder = .{
@@ -403,7 +408,7 @@ fn executeUi(
         backend,
         options,
     ) catch |err| {
-        const message = try std.fmt.allocPrint(context.allocator, "Could not remove unneeded packages. {0s}\n\nTechnical details: {1s}", .{ @import("diagnostics").cause(err), @errorName(err) });
+        const message = try std.fmt.allocPrint(context.allocator, "Could not remove unneeded packages. {0s}\n\nTechnical details: {1s}", .{ diagnostics.cause(err), @errorName(err) });
         defer context.allocator.free(message);
         try output.writeErrorFrame(context, message);
         try output.writeAlpmInfoFrame(context, "TransactionFailed", failureMessage(backend));
@@ -417,10 +422,33 @@ fn executeUi(
     return if (reporter.failed()) 1 else 0;
 }
 
+fn appendAurCacheTargets(allocator: std.mem.Allocator, result: *Result) !void {
+    std.debug.assert(result.owns_targets);
+    if (result.aur_cache_plans.len == 0) return;
+    const combined = try allocator.alloc([:0]const u8, result.targets.len + result.aur_cache_plans.len);
+    @memcpy(combined[0..result.targets.len], result.targets);
+    var initialized = result.targets.len;
+    errdefer {
+        for (combined[result.targets.len..initialized]) |target| allocator.free(target);
+        allocator.free(combined);
+    }
+    for (result.aur_cache_plans) |entry| {
+        combined[initialized] = try std.fmt.allocPrintSentinel(
+            allocator,
+            "[aur-cache] {s}{s}",
+            .{ entry.full_path, if (entry.directory) " (directory and all contents)" else "" },
+            0,
+        );
+        initialized += 1;
+    }
+    allocator.free(result.targets);
+    result.targets = combined;
+}
+
 fn appendCacheTargets(
     allocator: std.mem.Allocator,
     result: *Result,
-    cache_plan: *const Zigalpm.alpm.CacheRemovalPlan,
+    cache_plan: *const PackageManager.Manager.CacheRemovalPlan,
     label: []const u8,
 ) !void {
     std.debug.assert(result.owns_targets);
@@ -444,7 +472,7 @@ fn appendCacheTargets(
             "[{s}] {s} {s} ({d} B)",
             .{
                 label,
-                if (std.mem.eql(u8, label, "aur-cache")) item.package.full_path else item.package.name,
+                item.package.name,
                 item.package.version_release,
                 item.package.file_size +| item.signature_size,
             },
@@ -543,7 +571,7 @@ fn writePlanFailure(
     err: anyerror,
 ) !void {
     if (backend == .flatpak) {
-        if (Zigalpm.flatpak.errors.unavailableMessage(err)) |message| {
+        if (PackageManager.flatpak.errors.unavailableMessage(err)) |message| {
             if (invocation.globals.ui_mode)
                 try output.writeErrorFrame(context, message)
             else if (invocation.globals.json)
@@ -556,7 +584,7 @@ fn writePlanFailure(
     const message = try std.fmt.allocPrint(
         context.allocator,
         "Could not determine which {0f} packages can be removed. {1s}\n\nTechnical details: {2s}",
-        .{ @import("diagnostics").safe(@tagName(backend)), @import("diagnostics").cause(err), @errorName(err) },
+        .{ diagnostics.safe(@tagName(backend)), diagnostics.cause(err), @errorName(err) },
     );
     defer context.allocator.free(message);
     if (invocation.globals.ui_mode)
@@ -761,7 +789,7 @@ test "AUR cache cleanup previews files and deletes only after confirmation" {
     const Runner = struct {
         mutations: usize = 0,
 
-        fn run(self: *@This(), context: *runtime.RuntimeContext, operations: *Zigalpm.OperationContext, backend: Backend, options: Options) !Result {
+        fn run(self: *@This(), context: *runtime.RuntimeContext, operations: *PackageManager.OperationContext, backend: Backend, options: Options) !Result {
             try std.testing.expectEqual(Backend.standard, backend);
             try std.testing.expect(options.aur_cache);
             if (options.plan_only) {
@@ -771,8 +799,7 @@ test "AUR cache cleanup previews files and deletes only after confirmation" {
                 };
                 errdefer result.deinit(context.allocator);
                 result.aur_cache_plans = try aur_cache.plan(context, operations, try xdg.shellyCache(context, &.{}), options.dry_run);
-                for (result.aur_cache_plans) |*cache_plan|
-                    try appendCacheTargets(context.allocator, &result, cache_plan, "aur-cache");
+                try appendAurCacheTargets(context.allocator, &result);
                 return result;
             }
             self.mutations += 1;
@@ -794,6 +821,7 @@ test "AUR cache cleanup previews files and deletes only after confirmation" {
         try std.testing.expect(invocation == .dispatch);
         try std.testing.expectEqual(@as(?u8, 0), try dispatchWithRunner(&tc.context, &invocation.dispatch, &runner));
         const preview = std.mem.indexOf(u8, tc.stdout.writer.buffered(), "[aur-cache]").?;
+        try std.testing.expect(std.mem.indexOf(u8, tc.stdout.writer.buffered(), "(directory and all contents)") != null);
         if (index != 0)
             try std.testing.expect(preview < std.mem.indexOf(u8, tc.stdout.writer.buffered(), "Proceed with purify?").?);
         if (index < 2) {
@@ -802,7 +830,8 @@ test "AUR cache cleanup previews files and deletes only after confirmation" {
         }
     }
     try std.testing.expectEqual(@as(usize, 1), runner.mutations);
-    try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, archive, .{}));
+    try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "Shelly/example", .{}));
+    _ = try temporary.dir.statFile(std.testing.io, "Shelly", .{});
 }
 
 test "purify confirmation is default deny" {
@@ -840,7 +869,7 @@ test "destructive purify shows its plan before confirmation and mutates only aft
         pub fn run(
             self: *@This(),
             runtime_context: *runtime.RuntimeContext,
-            _: *Zigalpm.OperationContext,
+            _: *PackageManager.OperationContext,
             _: Backend,
             options: Options,
         ) !Result {
@@ -850,7 +879,7 @@ test "destructive purify shows its plan before confirmation and mutates only aft
                 try std.testing.expectEqual(@as(?usize, 3), options.cache_versions);
                 const cache_directory = try runtime_context.allocator.dupe(u8, "/tmp/cache");
                 errdefer runtime_context.allocator.free(cache_directory);
-                const cache_items = try runtime_context.allocator.alloc(Zigalpm.alpm.CacheRemovalItem, 0);
+                const cache_items = try runtime_context.allocator.alloc(PackageManager.Manager.CacheRemovalItem, 0);
                 return .{
                     .targets = &.{ "orphan-one", "[cache] cached-one 1.0-1 (12 B)" },
                     .cache_plan = .{
@@ -907,7 +936,7 @@ test "empty purify plans skip confirmation and backend mutation" {
         pub fn run(
             self: *@This(),
             _: *runtime.RuntimeContext,
-            _: *Zigalpm.OperationContext,
+            _: *PackageManager.OperationContext,
             _: Backend,
             options: Options,
         ) !Result {
@@ -942,7 +971,7 @@ test "no-confirm JSON emits one plan before quiet execution" {
         pub fn run(
             self: *@This(),
             _: *runtime.RuntimeContext,
-            _: *Zigalpm.OperationContext,
+            _: *PackageManager.OperationContext,
             _: Backend,
             options: Options,
         ) !Result {
@@ -975,7 +1004,7 @@ test "routes purify backends and preserves standard result formats" {
         pub fn run(
             self: *@This(),
             _: *runtime.RuntimeContext,
-            _: *Zigalpm.OperationContext,
+            _: *PackageManager.OperationContext,
             backend: Backend,
             options: Options,
         ) !Result {
@@ -1028,7 +1057,7 @@ test "purify UI emits result and transaction frames" {
         pub fn run(
             _: @This(),
             _: *runtime.RuntimeContext,
-            _: *Zigalpm.OperationContext,
+            _: *PackageManager.OperationContext,
             _: Backend,
             _: Options,
         ) !Result {
@@ -1083,7 +1112,7 @@ test "purify UI presents the plan before a compatible confirmation frame" {
         pub fn run(
             self: *@This(),
             _: *runtime.RuntimeContext,
-            _: *Zigalpm.OperationContext,
+            _: *PackageManager.OperationContext,
             _: Backend,
             options: Options,
         ) !Result {
@@ -1139,7 +1168,7 @@ test "purify backend failures return nonzero" {
         pub fn run(
             _: @This(),
             _: *runtime.RuntimeContext,
-            _: *Zigalpm.OperationContext,
+            _: *PackageManager.OperationContext,
             _: Backend,
             _: Options,
         ) !Result {

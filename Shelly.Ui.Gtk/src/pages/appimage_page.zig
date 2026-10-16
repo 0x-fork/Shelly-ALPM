@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const bindings = @import("Shelly_Ui_Gtk");
 const gtk = bindings.gtk;
 const gio = bindings.gio;
@@ -19,6 +20,7 @@ const ConfirmDialog = @import("../dialog/page/yn_dialog.zig").ConfirmDialog;
 const appimage_icon = @import("../helpers/appimage_icon.zig");
 const c_string = @import("../helpers/c_string.zig");
 const translations = @import("../helpers/translations.zig");
+const deep_link = @import("../helpers/deep_link.zig");
 
 fn uriComponentText(component: std.Uri.Component) []const u8 {
     return switch (component) {
@@ -114,6 +116,8 @@ pub const AppImagePage = extern struct {
         generation: u64 = 0,
         loaded: bool = false,
         toast: *Toast,
+        pending_install_buffer: [deep_link.max_file_path_len + 1]u8 = undefined,
+        pending_install_len: usize = 0,
         var offset: c_int = 0;
     };
 
@@ -210,7 +214,9 @@ pub const AppImagePage = extern struct {
         if (p.loaded) return;
         p.loaded = true;
         self.reload();
+        self.consumePendingInstall();
     }
+
 
     pub fn onUnmap(self: *Self) void {
         const p = self.priv();
@@ -251,7 +257,7 @@ pub const AppImagePage = extern struct {
         {
             const cli = ShellyCli{ .allocator = apps_arena.allocator(), .io = threaded.io() };
             const apps = cli.get_appimages() catch |err| {
-                std.debug.print("Could not load the installed AppImage list. {0s}\n\nTechnical details: {1s}\n", .{ @import("diagnostics").cause(err), @errorName(err) });
+                std.debug.print("Could not load the installed AppImage list. {0s}\n\nTechnical details: {1s}\n", .{ diagnostics.cause(err), @errorName(err) });
                 apps_arena.deinit();
                 std.heap.c_allocator.destroy(apps_arena);
                 return;
@@ -716,6 +722,27 @@ pub const AppImagePage = extern struct {
             .ctx = self,
             .privileged = false,
         });
+    }
+
+    pub fn openLocalFile(self: *Self, path: [:0]const u8) void {
+        const p = self.priv();
+        if (path.len > deep_link.max_file_path_len) return;
+
+        @memcpy(p.pending_install_buffer[0..path.len], path);
+        p.pending_install_buffer[path.len] = 0;
+        p.pending_install_len = path.len;
+
+        self.show_list();
+
+        if (p.loaded) self.consumePendingInstall();
+    }
+
+    fn consumePendingInstall(self: *Self) void {
+        const p = self.priv();
+        if (p.pending_install_len == 0) return;
+        const path = p.pending_install_buffer[0..p.pending_install_len :0];
+        p.pending_install_len = 0;
+        self.installFromPath(path);
     }
 
     fn on_file_drop(_: *gtk.DropTarget, value: *gobject.Value, _: f64, _: f64, self: *Self) callconv(.c) c_int {

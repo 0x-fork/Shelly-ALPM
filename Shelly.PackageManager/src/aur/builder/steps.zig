@@ -3,6 +3,8 @@
 //! environment, pkgver, and package metadata.
 
 const std = @import("std");
+const diagnostics = @import("diagnostics");
+const user_errors = @import("../../shared/user_errors.zig");
 const package_metadata = @import("../../pkgbuild/package_metadata.zig");
 const events = @import("../events.zig");
 const op_context = @import("operation_context");
@@ -66,7 +68,7 @@ pub fn reportUnwritableBuildDirectory(self: *PackageBuilder, path: []const u8) v
     const message = std.fmt.allocPrint(
         self.allocator,
         "The build user the invoking user cannot write to build directory {0f}. Check its ownership and permissions before retrying.",
-        .{@import("diagnostics").safe(path)},
+        .{diagnostics.safe(path)},
     ) catch return;
     defer self.allocator.free(message);
     if (self.active_operation) |operation|
@@ -123,7 +125,7 @@ pub fn runStep(
     };
     const executable_body = try std.fmt.allocPrint(
         self.allocator,
-        "{s}\n{s}\n{s}\ndeclare -- startdir=\"$4\"\ndeclare -- srcdir=\"$5\"\n{s}\n{s}\n{s}\ndeclare -- pkgver=\"$1\"\n__shelly_step() {{\n{s}\n}}\n{s}",
+        "{s}\n{s}\n{s}\ndeclare -- startdir=\"$4\"\ndeclare -- srcdir=\"$5\"\n{s}\n{s}\n{s}\ndeclare -- pkgver=\"$1\" pkgrel=\"$9\"\n__shelly_step() {{\n{s}\n}}\n{s}",
         .{
             if (package_step) virtualMetadataShellPrelude else "",
             if (package_step) package_metadata.shell_capture_prelude else "",
@@ -221,7 +223,21 @@ pub fn runStep(
         self.package_builds[0].options orelse &.{},
     );
     defer metadata.freeOwnedStrings(self.allocator, effective_options);
-    const step_argv: []const []const u8 = &.{ "/bin/bash", "-e", "-c", command_body, "shelly-step", current_pkgver, pkgver_result_path, metadata_result_path, runtime_startdir, srcdir, runtime_pkgdir, ownership_result_path, wrappers_path orelse "" };
+    // Generated split bases can exceed Linux's per-argument limit. Keep the
+    // script in the sandbox's private work directory instead of a bash -c
+    // argument; sourcing without extra arguments preserves $0 and $1..$9.
+    var script_random: [8]u8 = undefined;
+    self.io.random(&script_random);
+    const script_suffix = std.fmt.bytesToHex(script_random, .lower);
+    const script_path = try std.fmt.allocPrint(self.allocator, "{s}/.shelly-step-{s}.bash", .{ self.options.work_directory, script_suffix });
+    defer self.allocator.free(script_path);
+    var script_file = try std.Io.Dir.cwd().createFile(self.io, script_path, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    defer std.Io.Dir.cwd().deleteFile(self.io, script_path) catch {};
+    {
+        defer script_file.close(self.io);
+        try script_file.writeStreamingAll(self.io, command_body);
+    }
+    const step_argv: []const []const u8 = &.{ "/bin/bash", "-e", "-c", "builtin source -- \"${10}\"", "shelly-step", current_pkgver, pkgver_result_path, metadata_result_path, runtime_startdir, srcdir, runtime_pkgdir, ownership_result_path, wrappers_path orelse "", self.package_builds[0].pkg_rel orelse "", script_path };
     const sandbox_enabled = self.shellybuild_config.sandbox.enabled;
     const wrapped = if (sandbox_enabled) try wrapStepCommand(self, step_argv) else null;
     defer if (wrapped) |command| command.deinit(self.allocator);
@@ -248,7 +264,7 @@ pub fn runStep(
         return error.PrivilegedPackageOperationUnsupported;
     if (exit_code != 0) {
         if (sandbox_enabled) writeSandboxFailureHint(self);
-        const message = try @import("../../shared/user_errors.zig").buildFailed(self.allocator, package_name, step_name, exit_code);
+        const message = try user_errors.buildFailed(self.allocator, package_name, step_name, exit_code);
         defer self.allocator.free(message);
         operation.reportError(error.StepFailed, message, "build", exit_code, false);
         return error.StepFailed;
@@ -282,7 +298,13 @@ pub fn runStep(
             runtime_pkgdir,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.PrivilegedPackageOperationUnsupported,
+            else => {
+                const message = try std.fmt.allocPrint(self.allocator, "Cannot read package ownership journal for {f}: {s}.", .{ diagnostics.safe(package_name), @errorName(err) });
+                defer self.allocator.free(message);
+                if (self.active_log) |log| try log.writeRecord("error", message);
+                operation.reportError(error.PrivilegedPackageOperationUnsupported, message, "build", null, false);
+                return error.PrivilegedPackageOperationUnsupported;
+            },
         };
     }
     operation.status(.information, step_name, "aur_build_output", @intFromEnum(events.EventType.aur_build_output));
@@ -356,6 +378,14 @@ fn wrapStepCommand(self: *PackageBuilder, child_argv: []const []const u8) !Wrapp
     defer read_write.deinit(self.allocator);
     try read_write.append(self.allocator, self.options.work_directory);
     try read_write.append(self.allocator, self.options.start_directory);
+    // Metadata review can run before validateBuildDirectories. A configured
+    // source cache must exist before Landlock can grant lifecycle access.
+    std.Io.Dir.cwd().createDirPath(self.io, self.options.source_destination) catch {
+        reportUnwritableBuildDirectory(self, self.options.source_destination);
+        return error.BuildDirectoryNotWritable;
+    };
+    try validateWritableDirectory(self, self.options.source_destination);
+    try read_write.append(self.allocator, self.options.source_destination);
     for (sandbox_config.extra_write) |path|
         try read_write.append(self.allocator, path);
 
@@ -399,6 +429,7 @@ pub const DynamicMetadataOverrides = struct {
     arrays: DynamicArrayOverrides,
     unset_arrays: DynamicArrayUnsets,
     shell_options: ShellOptionDelta,
+    functions: std.StringHashMap([]const u8),
 
     pub fn deinit(self: *DynamicMetadataOverrides, allocator: std.mem.Allocator) void {
         deinitDynamicScalarOverrides(allocator, &self.scalars);
@@ -406,6 +437,7 @@ pub const DynamicMetadataOverrides = struct {
         deinitDynamicArrayOverrides(allocator, &self.arrays);
         deinitDynamicArrayUnsets(allocator, &self.unset_arrays);
         self.shell_options.deinit(allocator);
+        deinitDynamicScalarOverrides(allocator, &self.functions);
         self.* = undefined;
     }
 };
@@ -752,9 +784,72 @@ fn parseDynamicArrayOutput(
     return .{ .values = values, .unsets = unsets };
 }
 
+// Function records contain a name and the complete Bash declaration. This is
+// an authoritative snapshot, so absent names (including unset -f) stay absent.
+const dynamic_function_capture_prelude =
+    \\declare -A __shelly_before_functions=()
+    \\__shelly_snapshot_functions() {
+    \\  local __shelly_name
+    \\  while IFS= read -r __shelly_name; do
+    \\    __shelly_before_functions["$__shelly_name"]=$(builtin declare -f -- "$__shelly_name")
+    \\  done < <(builtin compgen -A function)
+    \\}
+    \\__shelly_capture_functions() {
+    \\  local __shelly_name __shelly_definition __shelly_count=0 __shelly_bytes=0
+    \\  : > "$1"
+    \\  while IFS= read -r __shelly_name; do
+    \\    case "$__shelly_name" in __shelly_*) continue ;; esac
+    \\    __shelly_definition=$(builtin declare -f -- "$__shelly_name") || return 1
+    \\    if [[ ${__shelly_before_functions[$__shelly_name]+present} == present && ${__shelly_before_functions[$__shelly_name]} == "$__shelly_definition" ]]; then
+    \\      continue
+    \\    fi
+    \\    __shelly_count=$((__shelly_count + 1))
+    \\    __shelly_bytes=$((__shelly_bytes + ${#__shelly_name} + ${#__shelly_definition} + 2))
+    \\    (( __shelly_count <= 4096 && __shelly_bytes <= 4194304 )) || return 1
+    \\    builtin printf '%s\0%s\0' "$__shelly_name" "$__shelly_definition" >> "$1"
+    \\  done < <(builtin compgen -A function)
+    \\}
+    \\readonly -f __shelly_snapshot_functions __shelly_capture_functions
+;
+
+fn parseDynamicFunctionOutput(allocator: std.mem.Allocator, output: []const u8) !std.StringHashMap([]const u8) {
+    const function_body = @import("../../pkgbuild/parser/function_body.zig");
+    var functions = std.StringHashMap([]const u8).init(allocator);
+    errdefer deinitDynamicScalarOverrides(allocator, &functions);
+    if (output.len > 4 * 1024 * 1024) return error.InvalidDynamicFunctionOutput;
+    var records = std.mem.splitScalar(u8, output, 0);
+    while (true) {
+        const name = records.next() orelse return error.InvalidDynamicFunctionOutput;
+        if (name.len == 0) {
+            if (records.next() != null) return error.InvalidDynamicFunctionOutput;
+            break;
+        }
+        if (functions.count() >= 4096 or functions.contains(name) or
+            std.mem.startsWith(u8, name, "__shelly_")) return error.InvalidDynamicFunctionOutput;
+        for (name) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "_-+.:", byte) == null)
+                return error.InvalidDynamicFunctionOutput;
+        }
+        const definition = records.next() orelse return error.InvalidDynamicFunctionOutput;
+        // Accept one complete canonical declaration, never trailing commands.
+        if (!std.mem.startsWith(u8, definition, name)) return error.InvalidDynamicFunctionOutput;
+        const suffix = definition[name.len..];
+        if (!std.mem.startsWith(u8, suffix, " () \n")) return error.InvalidDynamicFunctionOutput;
+        const end = (try function_body.function_end(definition, name)) orelse return error.InvalidDynamicFunctionOutput;
+        if (end > definition.len or std.mem.trim(u8, definition[end..], " \t\r\n").len != 0)
+            return error.InvalidDynamicFunctionOutput;
+        const key = try allocator.dupe(u8, name);
+        errdefer allocator.free(key);
+        const value = try allocator.dupe(u8, definition);
+        errdefer allocator.free(value);
+        try functions.put(key, value);
+    }
+    return functions;
+}
+
 /// Sources the reviewed PKGBUILD in the same sandbox used for lifecycle steps
-/// and captures one coherent snapshot of PKGBUILD scalar and indexed-array
-/// state. Each evaluation starts from the base PKGBUILD, never from a previous
+/// and captures one coherent snapshot of PKGBUILD scalar, indexed-array, and
+/// function state. Each evaluation starts from the base PKGBUILD, never from a previous
 /// evaluation's declarations. Sourcing preserves arbitrary top-level
 /// parameter defaults, `if`, `case`, helper calls, and short-circuit control
 /// flow; lifecycle functions are defined by Bash but are not invoked here.
@@ -808,6 +903,8 @@ pub fn evaluateDynamicMetadata(
     try writer.writeAll(dynamic_scalar_capture_prelude);
     try writer.writeAll("\n");
     try writer.writeAll(dynamic_array_capture_prelude);
+    try writer.writeAll("\n");
+    try writer.writeAll(dynamic_function_capture_prelude);
     try writer.writeAll(
         "\n__shelly_clear_user_arrays\n" ++
             "__shelly_snapshot_scalars\n" ++
@@ -824,9 +921,11 @@ pub fn evaluateDynamicMetadata(
         try writeTrackedMetadataName(writer, assignment.name, "scalar");
     for (array_names.items) |name| try writeTrackedMetadataName(writer, name, "array");
     try writer.writeAll(
-        "__shelly_before_bashopts=$BASHOPTS\n" ++
+        "__shelly_snapshot_functions\n" ++
+            "__shelly_before_bashopts=$BASHOPTS\n" ++
             "__shelly_before_shellopts=$SHELLOPTS\n" ++
             "source \"$4\"\n" ++
+            "__shelly_capture_functions \"$9\"\n" ++
             "__shelly_capture_scalar_changes \"$1\"\n" ++
             "__shelly_capture_array_changes \"$2\"\n" ++
             "printf '%s\\0%s\\0%s\\0%s\\0' \"$__shelly_before_bashopts\" \"$BASHOPTS\" \"$__shelly_before_shellopts\" \"$SHELLOPTS\" > \"$3\"\n",
@@ -865,6 +964,14 @@ pub fn evaluateDynamicMetadata(
     };
     defer std.Io.Dir.cwd().deleteFile(self.io, shell_option_result_path) catch {};
 
+    const function_result_path = try std.fs.path.join(self.allocator, &.{ self.options.work_directory, ".shelly-dynamic-functions" });
+    defer self.allocator.free(function_result_path);
+    std.Io.Dir.cwd().deleteFile(self.io, function_result_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    defer std.Io.Dir.cwd().deleteFile(self.io, function_result_path) catch {};
+
     try logPhase(self, "dynamic-metadata");
     try operation.checkCancelled();
     self.failure_location = .{
@@ -897,6 +1004,7 @@ pub fn evaluateDynamicMetadata(
         srcdir,
         pkgdir,
         self.shellybuild_config.build.carch,
+        function_result_path,
     };
     const sandbox_enabled = self.shellybuild_config.sandbox.enabled;
     const wrapped = if (sandbox_enabled) try wrapStepCommand(self, argv) else null;
@@ -915,7 +1023,7 @@ pub fn evaluateDynamicMetadata(
     if (self.active_log) |log| try log.ensureHealthy();
     if (exit_code != 0) {
         if (sandbox_enabled) writeSandboxFailureHint(self);
-        const message = try @import("../../shared/user_errors.zig").buildFailed(self.allocator, self.requested_names[0], "dynamic metadata evaluation", exit_code);
+        const message = try user_errors.buildFailed(self.allocator, self.requested_names[0], "dynamic metadata evaluation", exit_code);
         defer self.allocator.free(message);
         operation.reportError(error.StepFailed, message, "build", exit_code, false);
         return error.StepFailed;
@@ -956,7 +1064,11 @@ pub fn evaluateDynamicMetadata(
     defer self.allocator.free(shell_option_output);
     var shell_options = try parseShellOptionDelta(self.allocator, shell_option_output);
     errdefer shell_options.deinit(self.allocator);
+    const function_output = try std.Io.Dir.cwd().readFileAlloc(self.io, function_result_path, self.allocator, .limited(4 * 1024 * 1024));
+    defer self.allocator.free(function_output);
+    const functions = try parseDynamicFunctionOutput(self.allocator, function_output);
     return .{
+        .functions = functions,
         .scalars = scalar_result,
         .unset_scalars = unset_scalar_result,
         .arrays = array_result,
@@ -1099,19 +1211,34 @@ pub fn buildEnvironment(
         else
             null,
         .source_date_epoch = self.source_date_epoch,
+        .source_destination = self.options.source_destination,
         .ccache = self.shellybuild_config.build.ccache,
         .distcc = self.shellybuild_config.build.distcc,
     };
 }
 
 fn applyDynamicPkgver(self: *PackageBuilder, output: []const u8) !void {
-    const version = std.mem.trimEnd(u8, output, "\r\n");
+    const version = std.mem.trimEnd(u8, output, "\n");
     try metadata.validatePkgver(version);
+
+    if (self.options.pkgbuild_path != null) {
+        const owned = try self.allocator.dupe(u8, version);
+        if (self.pending_pkgver) |old| self.allocator.free(old);
+        self.pending_pkgver = owned;
+        return;
+    }
+    // Path-less unit fixtures have no PKGBUILD to rewrite or re-evaluate.
+    const changed = !std.mem.eql(u8, version, self.package_builds[0].pkg_version orelse "");
 
     for (self.package_builds) |*package_build| {
         const owned_version = try self.allocator.dupe(u8, version);
         if (package_build.pkg_version) |old| self.allocator.free(old);
         package_build.pkg_version = owned_version;
+        if (changed) {
+            const release = try self.allocator.dupe(u8, "1");
+            if (package_build.pkg_rel) |old| self.allocator.free(old);
+            package_build.pkg_rel = release;
+        }
 
         const map_value = try self.allocator.dupe(u8, version);
         if (package_build.variables.fetchRemove("pkgver")) |old| {
@@ -1274,10 +1401,11 @@ const virtualMetadataShellPrelude =
     \\    "$__shelly_root"|"$__shelly_root"/*) ;;
     \\    *) __shelly_metadata_reject 'ownership target outside package' "$__shelly_canonical"; return $? ;;
     \\  esac
+    \\  # Journal timestamps use a decimal point regardless of the package locale.
     \\  if [ "$__shelly_follow" -eq 1 ]; then
-    \\    __shelly_identity=$(/usr/bin/stat -Lc '%Hd:%Ld:%i:%.9W' -- "$__shelly_canonical") || { __shelly_metadata_reject; return $?; }
+    \\    __shelly_identity=$(LC_ALL=C /usr/bin/stat -Lc '%Hd:%Ld:%i:%.9W' -- "$__shelly_canonical") || { __shelly_metadata_reject; return $?; }
     \\  else
-    \\    __shelly_identity=$(/usr/bin/stat -c '%Hd:%Ld:%i:%.9W' -- "$__shelly_canonical") || { __shelly_metadata_reject; return $?; }
+    \\    __shelly_identity=$(LC_ALL=C /usr/bin/stat -c '%Hd:%Ld:%i:%.9W' -- "$__shelly_canonical") || { __shelly_metadata_reject; return $?; }
     \\  fi
     \\  __shelly_birth=${__shelly_identity##*:}
     \\  [ "$__shelly_birth" != '0.000000000' ] || { __shelly_metadata_reject; return $?; }
@@ -1513,4 +1641,39 @@ pub fn isPackageStep(name: []const u8) bool {
 pub fn findPackageStep(steps: []const ExecutionStep) ?*const ExecutionStep {
     for (steps) |*step| if (isPackageStep(step.name)) return step;
     return null;
+}
+
+test "dynamic function output validates complete bounded declarations" {
+    const allocator = std.testing.allocator;
+    const definition = "package_demo () \n{ \n    depends=(\"bash\");\n    printf '%s' \"$pkgdir\"\n}";
+    var functions = try parseDynamicFunctionOutput(allocator, "package_demo\x00" ++ definition ++ "\x00");
+    defer deinitDynamicScalarOverrides(allocator, &functions);
+    try std.testing.expectEqualStrings(definition, functions.get("package_demo").?);
+    for ([_][]const u8{
+        "demo\x00",
+        "demo\x00demo () \n{ :; }",
+        "demo\x00demo () \n{ :; }\x00\x00",
+        "demo\x00demo () \n{ :; }\x00demo\x00demo () \n{ :; }\x00",
+        "demo\x00demo () \n{ :; }; touch unwanted\x00",
+        "demo\x00demo () \n{ :;\x00",
+        "other\x00demo () \n{ :; }\x00",
+        "__shelly_step\x00__shelly_step () \n{ :; }\x00",
+        "bad name\x00bad name () \n{ :; }\x00",
+    }) |invalid| try std.testing.expectError(error.InvalidDynamicFunctionOutput, parseDynamicFunctionOutput(allocator, invalid));
+    var empty = try parseDynamicFunctionOutput(allocator, "");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
+}
+
+test "dynamic function output rejects oversized snapshots" {
+    const allocator = std.testing.allocator;
+    const oversized = try allocator.alloc(u8, 4 * 1024 * 1024 + 1);
+    defer allocator.free(oversized);
+    try std.testing.expectError(error.InvalidDynamicFunctionOutput, parseDynamicFunctionOutput(allocator, oversized));
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    for (0..4097) |index| {
+        try output.writer.print("f{d}\x00f{d} () \n{{ :; }}\x00", .{ index, index });
+    }
+    try std.testing.expectError(error.InvalidDynamicFunctionOutput, parseDynamicFunctionOutput(allocator, output.written()));
 }
