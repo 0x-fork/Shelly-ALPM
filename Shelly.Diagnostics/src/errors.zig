@@ -239,6 +239,7 @@ pub fn cause(err: anyerror) []const u8 {
         error.StreamTooLong, error.InvalidMessageSize => "The request or response exceeded its size limit. Check the selected input and reported limit; report the details if it persists.",
         error.PackageNotFound, error.PkgNotFound, error.NoPackageFound, error.FlatpakNotFound => "The requested package was not found in the selected source or installation. Check its name and selected source.",
         error.AurPackageNotFound => "The requested package is not available from the configured AUR service. Check the package name or select another source.",
+        error.OptionalDependencyProviderNotSelected => "No AUR provider was selected for this optional dependency. Check its availability or select a provider before retrying.",
         error.AurRpcLookupFailed, error.InvalidAurResponse => "The configured AUR service did not return a valid, complete response. Check the service and retry; package availability could not be confirmed.",
         error.AurHttpStatus => "The configured AUR service returned an unsuccessful HTTP status. Check the service and response details.",
         error.InvalidAurPackageBase => "The AUR package base is invalid. Check the selected package name.",

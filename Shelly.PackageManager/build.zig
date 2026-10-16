@@ -784,6 +784,7 @@ pub fn build(b: *std.Build) void {
         .name = "aur-test",
         .root_module = mod,
         .filters = &.{
+            "AUR optional dependency failures",
             "AUR dispatcher forwards package stages and build progress",
             "AUR needed",
             "AUR dispatcher returns provider selections",
