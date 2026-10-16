@@ -20,7 +20,7 @@ Default builds include both engines. Select RLPM with
 `shelly config set NativePackageBackend rlpm`, or restore libalpm with
 `shelly config set NativePackageBackend libalpm`. Build the CLI with
 `zig build -Dlibalpm=false` for an RLPM-only binary. See the
-[backend guide](docs/native-package-backends.md) for defaults, packaging,
+[backend guide](https://seafoam-labs.org/shelly-alpm/docs/rlpm/) for defaults, packaging,
 verification and the remaining release acceptance gates.
 
 ## Quick Install
@@ -100,7 +100,7 @@ Repository build dependencies stay in the guest; the exported package and its
 runtime dependencies are installed on the host. This also supports `--needed`
 and `--version`. As with `shelly build --isolated`, AUR-only build dependencies
 and package signing are not yet supported. `--isolated` cannot be combined with
-`--chroot` or dependency-only installation. See [isolated builds](docs/isolated-builds.md)
+`--chroot` or dependency-only installation. See [isolated builds](https://seafoam-labs.org/shelly-alpm/docs/build/#isolated-container-builds--i---isolated)
 for requirements and limitations.
 
 ## CLI file size display
@@ -288,7 +288,7 @@ CLI provides the same core functionality as the UI but in a scriptable, terminal
 
 ### CLI Commands
 
-Full documentation can be viewed on the [Shelly CLI Reference](https://www.seafoam-labs.org/shelly-alpm/docs/cli-reference/) page.
+Full documentation can be viewed on the [Shelly CLI Reference](https://seafoam-labs.org/shelly-alpm/docs/cli-reference/) page.
 
 Standard searches show available repository packages by default, with ranked
 matches for a query or a paginated listing when no query is supplied:
@@ -381,7 +381,7 @@ default configuration file at:
 
 #### Configuration Options
 
-These are listed on the [Shelly Configuration](https://www.seafoam-labs.org/shelly-alpm/docs/config/) page.
+These are listed on the [Shelly Configuration](https://seafoam-labs.org/shelly-alpm/docs/config/) page.
 
 ## Development
 
