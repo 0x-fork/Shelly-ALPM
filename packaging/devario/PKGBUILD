@@ -100,7 +100,8 @@ build() {
   (cd Shelly.Ui.Gtk && _zig_build \
     --prefix "${srcdir}/out-ui" \
     -Dflatpak-backend-package=shelly-flatpak-backend \
-    -Doptimize=ReleaseSafe)
+    -Doptimize=ReleaseSafe \
+    -Daur-backend=atoll)
 
   # Generate documentation with a fresh configuration, independent of the
   # builder's own Shelly settings.
