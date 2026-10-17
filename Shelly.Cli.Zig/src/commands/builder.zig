@@ -647,6 +647,7 @@ fn prepareReviewOnly(
             .source_destination = request.build_directory,
             .log_destination = request.build_directory,
             .pkgbuild_path = request.pkgbuild_path,
+            .native_database = .{ .config_path = context.config_path, .backend = PackageManager.Manager.defaultBackend() },
             .clean_after_success = true,
             .overwrite = false,
             .run_check = false,
@@ -1067,6 +1068,7 @@ const SrcinfoReal = struct {
                 .source_destination = request.shellybuild.destinations.sources orelse request.build_directory,
                 .log_destination = request.build_directory,
                 .pkgbuild_path = request.pkgbuild_path,
+                .native_database = .{ .config_path = context.config_path, .backend = PackageManager.Manager.defaultBackend() },
                 .clean_after_success = true,
                 .overwrite = false,
                 .run_check = false,
@@ -1343,6 +1345,7 @@ const Real = struct {
                 .source_destination = shellybuild.destinations.sources orelse build_directory,
                 .log_destination = shellybuild.destinations.logs orelse build_directory,
                 .pkgbuild_path = pkgbuild_path,
+                .native_database = .{ .config_path = context.config_path, .backend = PackageManager.Manager.defaultBackend() },
                 .clean_after_success = !optionEnabled(invocation, "--keep-workdirs"),
                 .overwrite = !optionEnabled(invocation, "--no-overwrite"),
                 .run_check = if (optionEnabled(invocation, "--no-check"))
@@ -5065,6 +5068,13 @@ test "dependency plan CLI resolves bootstrap and checks with either native confi
     defer temporary.cleanup();
     const directory = try temporary.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(directory);
+    // Keep the caller's build policy out of this fixture. The Zig test runner
+    // cannot dispatch the CLI's __sandbox-exec mode; an outer build sandbox
+    // still applies when these tests run from a PKGBUILD check().
+    try temporary.dir.createDirPath(io, ".config/shelly");
+    try temporary.dir.writeFile(io, .{ .sub_path = ".config/shelly/shellybuild.conf", .data = "[sandbox]\nenabled = false\n" });
+    const environ = try testEnvironWithHome(allocator, directory);
+    defer environ.block.deinit(allocator);
     try temporary.dir.createDir(io, "mirror", .default_dir);
     {
         var file = try temporary.dir.createFile(io, "mirror/planning.db", .{});
@@ -5106,12 +5116,14 @@ test "dependency plan CLI resolves bootstrap and checks with either native confi
             context.init();
             defer context.deinit();
             const a = context.arena.allocator();
-            context.context.environ = std.testing.environ;
+            context.context.environ = environ;
             context.context.config_path = try std.fs.path.join(a, &.{ directory, filename });
             const path = try std.fs.path.join(a, &.{ directory, "PKGBUILD" });
             const manifest = try @import("../cli/spec.zig").Manifest.load(a);
             const parsed = try parser.parse(a, &manifest, &.{ "build", "--resolve-dependencies", "--isolated", "--json", "--check", path });
-            try std.testing.expectEqual(@as(?u8, 0), try dispatch(&context.context, &parsed.dispatch));
+            const result = try dispatch(&context.context, &parsed.dispatch);
+            if (result != 0) std.debug.print("dependency plan failed:\n{s}\n{s}\n", .{ context.stdout.written(), context.stderr.written() });
+            try std.testing.expectEqual(@as(?u8, 0), result);
             var report = try std.json.parseFromSlice(build_plan.Plan, a, context.stdout.written(), .{ .allocate = .alloc_always });
             defer report.deinit();
             try report.value.validate(a);

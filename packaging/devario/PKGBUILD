@@ -138,7 +138,8 @@ check() {
   (cd Shelly.Flatpak.Backend && _zig_build test abi-test integration-test)
   (cd Shelly.PackageManager && _zig_build -Dlibalpm="${_shelly_libalpm}" \
     -Dpath-profile="${_shelly_path_profile}" \
-    flatpak-test native-backend-test rlpm-adapter-test bootstrap-test)
+    flatpak-test native-backend-test rlpm-adapter-test bootstrap-test \
+    pacfile-test path-profile-test buildinfo-test sandbox-policy-test)
   (cd Shelly.Rlpm && _zig_build test -Dpath-profile="${_shelly_path_profile}")
   (cd Shelly.Key && _zig_build test -Dpath-profile="${_shelly_path_profile}")
   (cd Shelly.Cli.Zig && _zig_build test -Dlibalpm="${_shelly_libalpm}" \

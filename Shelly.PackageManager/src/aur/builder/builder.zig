@@ -61,6 +61,34 @@ pub fn deinitArtifacts(allocator: std.mem.Allocator, artifacts: []BuildArtifact)
     allocator.free(artifacts);
 }
 
+/// Native database used when collecting BUILDINFO after dependency installation.
+/// Paths are borrowed and must remain valid until PackageBuilder.deinit().
+pub const BuildDatabase = struct {
+    const Manager = @import("../../alpm/manager.zig").Manager;
+    backend: ?Manager.Backend = null,
+    config_path: ?[]const u8 = null,
+    root_directory: ?[]const u8 = null,
+    database_path: ?[]const u8 = null,
+
+    pub fn fromManager(manager: *const Manager, config_path: ?[]const u8) BuildDatabase {
+        return .{
+            .backend = manager.backend(),
+            .config_path = config_path,
+            .root_directory = manager.config.root_directory,
+            .database_path = manager.config.database_path,
+        };
+    }
+
+    pub fn initOptions(self: BuildDatabase) Manager.InitOptions {
+        return .{
+            .backend = self.backend,
+            .config_path = self.config_path,
+            .root_directory = self.root_directory,
+            .database_path = self.database_path,
+        };
+    }
+};
+
 pub const BuildOptions = struct {
     run_check: bool,
     run_verify: bool = true,
@@ -102,9 +130,10 @@ pub const BuildOptions = struct {
     review_digest_is_automation: bool = false,
     /// SHA-256 of only the PKGBUILD, for BUILDINFO v2.
     pkgbuild_sha256sum: ?[std.crypto.hash.sha2.Sha256.digest_length]u8 = null,
-    /// Optional deterministic build-environment snapshot. Production callers
-    /// leave this null and the builder reads libalpm's local database.
+    /// Optional deterministic build-environment snapshot. Otherwise the builder
+    /// reads native_database at metadata-generation time.
     installed_packages: ?[]const []const u8 = null,
+    native_database: BuildDatabase = .{},
     /// Byte-exact install scripts retained by the approved package review.
     install_scripts: []const install_script.Script = &.{},
     /// Byte-exact local and auxiliary files retained by package review.
