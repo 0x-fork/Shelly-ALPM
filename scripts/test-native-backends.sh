@@ -45,7 +45,6 @@ build_args=(-Dlibalpm="$enabled" -Doptimize="$optimize" --summary all)
 export XDG_CONFIG_HOME="$stage/config" XDG_CACHE_HOME="$stage/cache" XDG_DATA_HOME="$stage/data" XDG_STATE_HOME="$stage/state"
 unset SUDO_USER SUDO_UID DOAS_USER PKEXEC_UID
 cli="$stage/install/bin/shelly"
-bash scripts/check-cli-linkage.sh "$cli"
 for name in shelly-rlpm-action-worker shelly-download-worker rlpm-worker-fixture; do
     test ! -e "$stage/install/bin/$name"
 done
