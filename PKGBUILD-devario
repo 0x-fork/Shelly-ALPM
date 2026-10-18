@@ -155,6 +155,10 @@ package() {
   local executable dynamic linked
   for executable in shelly shelly-ui shelly-key shelly-notifications; do
     dynamic=$(LC_ALL=C readelf -d "$pkgdir/usr/bin/$executable") || return 1
+    if [[ $executable == shelly && $dynamic != *'Shared library: [libsqlite3.so.0]'* ]]; then
+      printf 'Shelly CLI must directly depend on libsqlite3.so.0 (#2059)\n' >&2
+      return 1
+    fi
     [[ $dynamic == *'(NEEDED)'* ]] || continue
     linked=$(LC_ALL=C ldd "$pkgdir/usr/bin/$executable") || return 1
     if [[ $linked == *libalpm.so* || $linked == *'not found'* ]]; then
