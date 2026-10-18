@@ -147,6 +147,10 @@ package_shelly() {
   install -Dm755 out-cli/bin/shelly "$pkgdir/usr/bin/shelly"
   local shelly_dynamic
   shelly_dynamic=$(LC_ALL=C readelf -d "$pkgdir/usr/bin/shelly") || return 1
+  if [[ $shelly_dynamic != *'Shared library: [libsqlite3.so.0]'* ]]; then
+    printf 'Shelly CLI must directly depend on libsqlite3.so.0 (#2059)\n' >&2
+    return 1
+  fi
   if [[ $_shelly_libalpm == true && $shelly_dynamic != *libalpm.so* ]] ||
      [[ $_shelly_libalpm == false && $shelly_dynamic == *libalpm.so* ]]; then
     printf 'Shelly binary does not match SHELLY_LIBALPM package metadata\n' >&2
