@@ -100,7 +100,8 @@ build() {
   (cd Shelly.Ui.Gtk && _zig_build \
     --prefix "${srcdir}/out-ui" \
     -Dflatpak-backend-package=shelly-flatpak-backend \
-    -Doptimize=ReleaseSafe)
+    -Doptimize=ReleaseSafe \
+    -Daur-backend=atoll)
 
   # Generate documentation with a fresh configuration, independent of the
   # builder's own Shelly settings.
@@ -138,7 +139,8 @@ check() {
   (cd Shelly.Flatpak.Backend && _zig_build test abi-test integration-test)
   (cd Shelly.PackageManager && _zig_build -Dlibalpm="${_shelly_libalpm}" \
     -Dpath-profile="${_shelly_path_profile}" \
-    flatpak-test native-backend-test rlpm-adapter-test bootstrap-test)
+    flatpak-test native-backend-test rlpm-adapter-test bootstrap-test \
+    pacfile-test path-profile-test buildinfo-test sandbox-policy-test)
   (cd Shelly.Rlpm && _zig_build test -Dpath-profile="${_shelly_path_profile}")
   (cd Shelly.Key && _zig_build test -Dpath-profile="${_shelly_path_profile}")
   (cd Shelly.Cli.Zig && _zig_build test -Dlibalpm="${_shelly_libalpm}" \
@@ -221,6 +223,10 @@ package_shelly-cli() {
   # The package metadata must match the compiled native backend variant.
   local dynamic
   dynamic=$(LC_ALL=C readelf -d "${pkgdir}/usr/bin/shelly") || return 1
+  if [[ $dynamic != *'Shared library: [libsqlite3.so.0]'* ]]; then
+    printf 'Shelly CLI must directly depend on libsqlite3.so.0 (#2059)\n' >&2
+    return 1
+  fi
   if [[ ${_shelly_libalpm} == true && ${dynamic} != *libalpm.so* ]] ||
      [[ ${_shelly_libalpm} == false && ${dynamic} == *libalpm.so* ]]; then
     printf 'shelly does not match SHELLY_LIBALPM=%s\n' "${_shelly_libalpm}" >&2

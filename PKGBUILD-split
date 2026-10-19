@@ -10,17 +10,19 @@ pkgname=(
   'shelly-notify'
   'shelly-notify-none'
 )
-pkgver=3.1.7
+pkgver=3.1.8
 pkgrel=1
 arch=('x86_64' 'aarch64')
 url='https://github.com/Seafoam-Labs/Shelly-ALPM'
 license=('GPL-3.0-only')
 makedepends=(
+  'binutils'
   'flatpak'
   'gettext'
   'go-md2man'
   'gtk4'
   'pkgconf'
+  'sqlite'
   'zig>=0.16.0'
 )
 checkdepends=('ripgrep')
@@ -159,6 +161,7 @@ package_shelly-cli() {
     'gnupg'
     'libarchive'
     'pacman>=7'
+    'sqlite'
     'sudo'
     'tar'
   )
@@ -182,6 +185,12 @@ package_shelly-cli() {
   cd "${_srcdir}"
 
   install -Dm755 "${srcdir}/out-cli/bin/shelly" -t "${pkgdir}/usr/bin"
+  local shelly_dynamic
+  shelly_dynamic=$(LC_ALL=C readelf -d "${pkgdir}/usr/bin/shelly") || return 1
+  if [[ $shelly_dynamic != *'Shared library: [libsqlite3.so.0]'* ]]; then
+    printf 'Shelly CLI must directly depend on libsqlite3.so.0 (#2059)\n' >&2
+    return 1
+  fi
   install -Dm755 "${srcdir}/out-key/bin/shelly-key" -t "${pkgdir}/usr/bin"
   install -Dm644 shellybuild.conf -t "${pkgdir}/etc"
 
