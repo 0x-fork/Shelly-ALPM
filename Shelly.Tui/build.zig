@@ -12,8 +12,6 @@ pub fn build(b: *std.Build) void {
     // means any target is allowed, and the default is native. Other options
     // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
-    // Zig 0.16's native ELF linker cannot handle PC64 relocations in newer glibc.
-    const use_llvm: ?bool = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) true else null;
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
@@ -63,8 +61,6 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "Shelly_Tui",
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
@@ -145,8 +141,6 @@ pub fn build(b: *std.Build) void {
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
     const mod_tests = b.addTest(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .root_module = mod,
     });
 
@@ -157,8 +151,6 @@ pub fn build(b: *std.Build) void {
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .root_module = exe.root_module,
     });
 

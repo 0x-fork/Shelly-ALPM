@@ -2,8 +2,6 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // Zig 0.16's native ELF linker cannot handle PC64 relocations in newer glibc.
-    const use_llvm: ?bool = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) true else null;
     const optimize = b.standardOptimizeOption(.{});
     const diagnostics = b.dependency("shelly_diagnostics", .{ .target = target, .optimize = optimize }).module("diagnostics");
 
@@ -42,8 +40,6 @@ pub fn build(b: *std.Build) void {
     });
 
     const backend = b.addLibrary(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "shelly-flatpak-backend",
         .linkage = .dynamic,
         .root_module = backend_module,
@@ -53,8 +49,6 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(backend);
 
     const protocol_tests = b.addTest(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "flatpak-protocol-test",
         .root_module = protocol,
     });
@@ -71,8 +65,6 @@ pub fn build(b: *std.Build) void {
     fake_backend_module.addImport("diagnostics", diagnostics);
     fake_backend_module.addImport("Shelly_Flatpak_Protocol", protocol);
     const fake_backend = b.addLibrary(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "shelly-flatpak-backend-fake",
         .linkage = .dynamic,
         .root_module = fake_backend_module,
@@ -80,8 +72,6 @@ pub fn build(b: *std.Build) void {
     fake_backend.root_module.addImport("diagnostics", diagnostics);
 
     const missing_backend = b.addLibrary(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "shelly-flatpak-backend-missing-entry",
         .linkage = .dynamic,
         .root_module = b.createModule(.{
@@ -100,8 +90,6 @@ pub fn build(b: *std.Build) void {
     incompatible_backend_module.addImport("diagnostics", diagnostics);
     incompatible_backend_module.addImport("Shelly_Flatpak_Protocol", protocol);
     const incompatible_backend = b.addLibrary(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "shelly-flatpak-backend-incompatible",
         .linkage = .dynamic,
         .root_module = incompatible_backend_module,
@@ -116,8 +104,6 @@ pub fn build(b: *std.Build) void {
     short_backend_module.addImport("diagnostics", diagnostics);
     short_backend_module.addImport("Shelly_Flatpak_Protocol", protocol);
     const short_backend = b.addLibrary(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "shelly-flatpak-backend-short",
         .linkage = .dynamic,
         .root_module = short_backend_module,
@@ -132,8 +118,6 @@ pub fn build(b: *std.Build) void {
     null_backend_module.addImport("diagnostics", diagnostics);
     null_backend_module.addImport("Shelly_Flatpak_Protocol", protocol);
     const null_backend = b.addLibrary(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "shelly-flatpak-backend-null",
         .linkage = .dynamic,
         .root_module = null_backend_module,
@@ -161,8 +145,6 @@ pub fn build(b: *std.Build) void {
     abi_test_module.addImport("Shelly_Flatpak_Protocol", protocol);
     abi_test_module.addOptions("abi_test_options", abi_test_options);
     const abi_tests = b.addTest(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "flatpak-abi-test",
         .root_module = abi_test_module,
     });
@@ -172,8 +154,6 @@ pub fn build(b: *std.Build) void {
     abi_step.dependOn(&run_abi_tests.step);
 
     const parity_tests = b.addTest(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "flatpak-backend-parity-test",
         .root_module = backend_module,
         .filters = &.{
@@ -197,8 +177,6 @@ pub fn build(b: *std.Build) void {
     parity_step.dependOn(&run_parity_tests.step);
 
     const live_tests = b.addTest(.{
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
         .name = "flatpak-backend-live-test",
         .root_module = backend_module,
         .filters = &.{

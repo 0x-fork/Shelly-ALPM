@@ -220,11 +220,11 @@ Upcoming features and development targets:
 - **vala** (for building)
 - **libalpm** (provided by `pacman`; omitted from the CLI build with `-Dlibalpm=false`)
 
-CI uses the official Zig **0.16.0** release. Linux x86_64 executables, libraries,
-and tests in the CI components explicitly use LLVM and LLD to avoid a native
-linker incompatibility with newer glibc startup objects (`R_X86_64_PC64`).
-This can increase Debug compilation time; release builds already use LLVM by
-default. No custom compiler build is required.
+CI installs the prebuilt Arch **zig 0.16.0-1** package with its LLVM 21 runtime
+dependencies. This package includes the `R_X86_64_PC64` linker fix required by
+newer glibc startup objects. The shared setup action installs it after system
+updates and verifies the package and compiler versions. Builds retain Zig's
+normal backend defaults; CI does not rebuild the compiler.
 
 ### Optional Prerequisites
 
