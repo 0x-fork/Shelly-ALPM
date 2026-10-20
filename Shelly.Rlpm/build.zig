@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    // Zig 0.16's native ELF linker cannot handle PC64 relocations in newer glibc.
+    const use_llvm: ?bool = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) true else null;
     const optimize = b.standardOptimizeOption(.{});
     const path_profile = b.option([]const u8, "path-profile", "Distribution defaults for the key utility") orelse "pacman";
     const shelly_key = b.dependency("shelly_key", .{ .target = target, .optimize = optimize, .@"path-profile" = path_profile });
@@ -40,6 +42,8 @@ pub fn build(b: *std.Build) void {
     mod.addImport("Shelly_Download", download.module("Shelly_Download"));
     // Only test consumers request this artifact; it is never installed.
     const worker_fixture = b.addExecutable(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "rlpm-worker-fixture",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/worker_fixture.zig"),
@@ -62,6 +66,8 @@ pub fn build(b: *std.Build) void {
     mod.addCSourceFile(.{ .file = b.path("src/native/lock.c"), .flags = &.{"-std=c11"} });
 
     const exe = b.addExecutable(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "Shelly_Rlpm",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -76,13 +82,15 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Read local metadata (arguments: ROOT DBPATH)").dependOn(&run.step);
 
-    const unit = b.addTest(.{ .root_module = mod });
+    const unit = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = mod });
     const test_step = b.step("test", "Run hermetic tests, public API checks, and reference ledger validation");
     test_step.dependOn(&b.addRunArtifact(unit).step);
     // Compile the real read-only example too, rather than an empty test runner.
     test_step.dependOn(&exe.step);
 
     const self_execution = b.addExecutable(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "rlpm-self-execution-test",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/self_execution.zig"),
@@ -95,7 +103,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_self_execution.step);
     b.step("test-self-execution", "Exercise actions after replacing the embedding executable").dependOn(&run_self_execution.step);
 
-    const public_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const public_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/public_api.zig"),
         .target = target,
         .optimize = optimize,
@@ -114,7 +122,7 @@ pub fn build(b: *std.Build) void {
         &run_public.step,
     );
 
-    const metadata_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const metadata_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/metadata.zig"),
         .target = target,
         .optimize = optimize,
@@ -124,7 +132,7 @@ pub fn build(b: *std.Build) void {
         &b.addRunArtifact(metadata_tests).step,
     );
 
-    const database_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const database_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/database.zig"),
         .target = target,
         .optimize = optimize,
@@ -134,7 +142,7 @@ pub fn build(b: *std.Build) void {
         &b.addRunArtifact(database_tests).step,
     );
 
-    const verification_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const verification_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/verification.zig"),
         .target = target,
         .optimize = optimize,
@@ -144,7 +152,7 @@ pub fn build(b: *std.Build) void {
         &b.addRunArtifact(verification_tests).step,
     );
 
-    const resolver_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const resolver_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/resolver.zig"),
         .target = target,
         .optimize = optimize,
@@ -154,7 +162,7 @@ pub fn build(b: *std.Build) void {
         &b.addRunArtifact(resolver_tests).step,
     );
 
-    const executor_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const executor_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/executor.zig"),
         .target = target,
         .optimize = optimize,
@@ -166,7 +174,7 @@ pub fn build(b: *std.Build) void {
         &run_executor_tests.step,
     );
     test_step.dependOn(&run_executor_tests.step);
-    const hook_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const hook_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/hooks.zig"),
         .target = target,
         .optimize = optimize,
@@ -176,7 +184,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-hooks", "Run hermetic hook parser, discovery, matching and ownership fixtures").dependOn(
         &b.addRunArtifact(hook_tests).step,
     );
-    const preflight_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const preflight_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/preflight.zig"),
         .target = target,
         .optimize = optimize,
@@ -185,7 +193,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-preflight", "Run private-root archive, conflict, backup and space fixtures").dependOn(
         &b.addRunArtifact(preflight_tests).step,
     );
-    const sandbox_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const sandbox_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/download_sandbox.zig"),
         .target = target,
         .optimize = optimize,
@@ -200,7 +208,7 @@ pub fn build(b: *std.Build) void {
     b.step("check-download-sandbox", "Compile the root-only integration fixture").dependOn(
         &sandbox_tests.step,
     );
-    const download_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const download_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/download.zig"),
         .target = target,
         .optimize = optimize,
@@ -209,7 +217,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-download", "Run private-cache, acquisition, refresh and DOWNLOADONLY fixtures").dependOn(
         &b.addRunArtifact(download_tests).step,
     );
-    const transaction_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const transaction_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/transaction.zig"),
         .target = target,
         .optimize = optimize,
@@ -228,7 +236,7 @@ pub fn build(b: *std.Build) void {
         &b.addRunArtifact(transaction_tests).step,
     );
 
-    const ledger_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const ledger_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/compatibility.zig"),
         .target = target,
         .optimize = optimize,
@@ -242,7 +250,7 @@ pub fn build(b: *std.Build) void {
         &run_ledger.step,
     );
 
-    const version_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const version_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/structs/Version.zig"),
         .target = target,
         .optimize = optimize,
@@ -256,7 +264,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     package_mod.linkSystemLibrary("archive", .{});
-    const package_tests = b.addTest(.{ .root_module = package_mod });
+    const package_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = package_mod });
     b.step("test-package", "Run hermetic package archive tests").dependOn(
         &b.addRunArtifact(package_tests).step,
     );
@@ -274,7 +282,7 @@ pub fn build(b: *std.Build) void {
         },
         .mode = .simple,
     };
-    const payload_benchmark = b.addTest(.{ .root_module = b.createModule(.{
+    const payload_benchmark = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/payload_benchmark.zig"),
         .target = target,
         .optimize = optimize,
@@ -290,7 +298,7 @@ pub fn build(b: *std.Build) void {
     ).dependOn(
         &run_payload_benchmark.step,
     );
-    const executor_driver = b.addExecutable(.{ .name = "rlpm-executor-fixture", .root_module = b.createModule(.{
+    const executor_driver = b.addExecutable(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .name = "rlpm-executor-fixture", .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/executor_driver.zig"),
         .target = target,
         .optimize = optimize,
@@ -308,7 +316,7 @@ pub fn build(b: *std.Build) void {
     ).dependOn(
         &interop.step,
     );
-    const executor_integration = b.addTest(.{ .root_module = b.createModule(.{
+    const executor_integration = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/executor_integration.zig"),
         .target = target,
         .optimize = optimize,
@@ -325,7 +333,7 @@ pub fn build(b: *std.Build) void {
     ).dependOn(
         &run_executor.step,
     );
-    const action_filter = b.addExecutable(.{ .name = "rlpm-action-filter-fixture", .root_module = b.createModule(.{
+    const action_filter = b.addExecutable(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .name = "rlpm-action-filter-fixture", .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/action_filter.zig"),
         .target = target,
         .optimize = optimize,
@@ -333,7 +341,7 @@ pub fn build(b: *std.Build) void {
     }) });
     action_filter.root_module.addOptions("worker_fixture", worker_fixture_options);
     action_filter.root_module.addImport("workers", workers);
-    const action_probe = b.addExecutable(.{ .name = "rlpm-action-probe-fixture", .root_module = b.createModule(.{
+    const action_probe = b.addExecutable(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .name = "rlpm-action-probe-fixture", .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/action_probe.zig"),
         .target = target,
         .optimize = optimize,
@@ -342,7 +350,7 @@ pub fn build(b: *std.Build) void {
     const action_fixture_options = b.addOptions();
     action_fixture_options.addOptionPath("filter", action_filter.getEmittedBin());
     action_fixture_options.addOptionPath("probe", action_probe.getEmittedBin());
-    const action_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const action_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests/actions.zig"),
         .target = target,
         .optimize = optimize,
@@ -371,6 +379,8 @@ pub fn build(b: *std.Build) void {
         &action_tests.step,
     );
     const signature_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/signature.zig"),
             .target = target,
@@ -397,6 +407,8 @@ pub fn build(b: *std.Build) void {
     host_mod.linkSystemLibrary("archive", .{});
     host_mod.linkSystemLibrary("sqlite3", .{ .needed = true, .use_pkg_config = .no });
     const host_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = host_mod,
         .filters = &.{"host-readonly:"},
         .test_runner = terminal_runner,

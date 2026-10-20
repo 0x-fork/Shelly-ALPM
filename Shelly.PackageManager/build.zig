@@ -52,6 +52,8 @@ pub fn build(b: *std.Build) void {
     // means any target is allowed, and the default is native. Other options
     // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
+    // Zig 0.16's native ELF linker cannot handle PC64 relocations in newer glibc.
+    const use_llvm: ?bool = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) true else null;
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
@@ -84,10 +86,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "diagnostics", .module = diagnostics },
         },
     });
-    const rlpm_adapter_tests = b.addRunArtifact(b.addTest(.{ .root_module = rlpm_adapter }));
+    const rlpm_adapter_tests = b.addRunArtifact(b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = rlpm_adapter }));
     const rlpm_adapter_step = b.step("rlpm-adapter-test", "Test RLPM lifecycle/deferred UI adapter in private roots");
     rlpm_adapter_step.dependOn(&rlpm_adapter_tests.step);
-    rlpm_adapter_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = operation_context_mod })).step);
+    rlpm_adapter_step.dependOn(&b.addRunArtifact(b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = operation_context_mod })).step);
     // Validate this opt-in adapter without building the other native backends.
     if (b.option(bool, "rlpm-adapter-only", "Build only the RLPM callback adapter") orelse false) return;
     const shelly_download = b.dependency("shelly_download", .{ .target = target, .optimize = optimize }).module("Shelly_Download");
@@ -124,6 +126,8 @@ pub fn build(b: *std.Build) void {
     archive_mod.addImport("diagnostics", diagnostics);
     archive_mod.linkSystemLibrary("archive", .{});
     const compression_tests = b.addRunArtifact(b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = archive_mod,
         .filters = &.{ "compression presets", "archive writer", "archive virtual ownership" },
     }));
@@ -225,7 +229,7 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "libalpm", test_libalpm);
     test_mod.addOptions("package_options", test_options);
 
-    const native_backend_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const native_backend_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/alpm/backend_test.zig"),
         .target = target,
         .optimize = optimize,
@@ -235,10 +239,12 @@ pub fn build(b: *std.Build) void {
     const worker_fixture_options = b.addOptions();
     worker_fixture_options.addOptionPath("path", rlpm_dependency.namedLazyPath("worker_fixture"));
     native_backend_tests.root_module.addOptions("worker_fixture", worker_fixture_options);
-    const build_plan_tests = b.addTest(.{ .root_module = native_backend_tests.root_module, .filters = &.{"dependency plan"} });
+    const build_plan_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = native_backend_tests.root_module, .filters = &.{"dependency plan"} });
     b.step("build-plan-test", "Test native dependency planning and pinned provisioning in private roots").dependOn(&b.addRunArtifact(build_plan_tests).step);
 
     const native_environment_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_mod,
         .filters = &.{
             "Manager.sync keeps included repository mirrors separate during fallback",
@@ -265,6 +271,8 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "PackageManager",
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
@@ -340,6 +348,8 @@ pub fn build(b: *std.Build) void {
     // set the releative field.
     const test_filters = b.option([]const []const u8, "test-filter", "Run root tests whose names contain this text") orelse &.{};
     const mod_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_mod,
         .filters = test_filters,
     });
@@ -359,6 +369,8 @@ pub fn build(b: *std.Build) void {
         exe_test_module.addImport(name, if (std.mem.eql(u8, name, "PackageManager")) test_mod else imported);
     }
     const exe_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = exe_test_module,
         .filters = test_filters,
     });
@@ -376,6 +388,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&compression_tests.step);
 
     const bootstrap_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_mod,
         .filters = &.{ "bootstrap", "provisioning", "root finalizer" },
     });
@@ -383,6 +397,8 @@ pub fn build(b: *std.Build) void {
     bootstrap_step.dependOn(&b.addRunArtifact(bootstrap_tests).step);
 
     const hook_helper = b.addExecutable(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "bootstrap-hook-helper",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/alpm/bootstrap_hook_helper.zig"),
@@ -400,7 +416,7 @@ pub fn build(b: *std.Build) void {
     hook_test_module.addImport("PackageManager", test_mod);
     hook_test_module.addOptions("hook_fixture", hook_fixture);
     hook_test_module.addOptions("worker_fixture", worker_fixture_options);
-    const hook_tests = b.addTest(.{ .root_module = hook_test_module });
+    const hook_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = hook_test_module });
     const run_hook_tests = b.addSystemCommand(&.{ "unshare", "--user", "--map-root-user", "--mount", "--pid", "--mount-proc", "--fork" });
     run_hook_tests.addArtifactArg(hook_tests);
     run_hook_tests.has_side_effects = true;
@@ -408,6 +424,8 @@ pub fn build(b: *std.Build) void {
     hook_step.dependOn(&run_hook_tests.step);
 
     const account_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "user-account-test",
         .root_module = test_mod,
         .filters = &.{ "NSS", "invoking-user", "VCS build commands" },
@@ -415,33 +433,37 @@ pub fn build(b: *std.Build) void {
     const run_account_tests = b.addRunArtifact(account_tests);
     const account_test_step = b.step("user-account-test", "Test NSS account resolution and invoking-user build commands");
     account_test_step.dependOn(&run_account_tests.step);
-    const account_lookup_tests = b.addTest(.{ .root_module = user_account_mod });
+    const account_lookup_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = user_account_mod });
     const run_account_lookup_tests = b.addRunArtifact(account_lookup_tests);
     account_test_step.dependOn(&run_account_lookup_tests.step);
     test_step.dependOn(&run_account_lookup_tests.step);
 
-    const path_profile_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"native helper path defaults"} });
+    const path_profile_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = test_mod, .filters = &.{"native helper path defaults"} });
     b.step("path-profile-test", "Test helper defaults and explicit path overrides")
         .dependOn(&b.addRunArtifact(path_profile_tests).step);
 
     const pacfile_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_mod,
         .filters = &.{ "pacfile", "pacman database discovery", "find discovery", "base archive selection", "three-way merge" },
     });
     const pacfile_test_step = b.step("pacfile-test", "Test native pacfile discovery, ownership, and merging");
     pacfile_test_step.dependOn(&b.addRunArtifact(pacfile_tests).step);
 
-    const buildinfo_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"BUILDINFO"} });
+    const buildinfo_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = test_mod, .filters = &.{"BUILDINFO"} });
     const buildinfo_test_step = b.step("buildinfo-test", "Test native build metadata and database selection");
     buildinfo_test_step.dependOn(&b.addRunArtifact(buildinfo_tests).step);
 
-    const sandbox_policy_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"sandbox policy denies paths"} });
+    const sandbox_policy_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = test_mod, .filters = &.{"sandbox policy denies paths"} });
     const sandbox_policy_test_step = b.step("sandbox-policy-test", "Test sandbox allow-list boundaries under /tmp");
     sandbox_policy_test_step.dependOn(&b.addRunArtifact(sandbox_policy_tests).step);
 
-    const checksum_update_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"updpkgsums"} });
+    const checksum_update_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = test_mod, .filters = &.{"updpkgsums"} });
     b.step("updpkgsums-test", "Test checksum editing and metadata publication").dependOn(&b.addRunArtifact(checksum_update_tests).step);
     const builder_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "builder-test",
         .root_module = test_mod,
         .filters = &.{ "PackageBuilder", "dynamic function output", "updpkgsums" },
@@ -467,6 +489,8 @@ pub fn build(b: *std.Build) void {
     shellybuild_test_module.addImport("operation_context", operation_context_mod);
     shellybuild_test_module.addImport("user_account", user_account_mod);
     const shellybuild_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "shellybuild-test",
         .root_module = shellybuild_test_module,
     });
@@ -490,12 +514,14 @@ pub fn build(b: *std.Build) void {
     local_test_module.addImport("Shelly_Download", shelly_download);
     local_test_module.addImport("archive", archive_mod);
     local_test_module.addImport("operation_context", operation_context_mod);
-    const local_tests = b.addTest(.{ .root_module = local_test_module });
+    const local_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = local_test_module });
     const run_local_tests = b.addRunArtifact(local_tests);
     const local_test_step = b.step("local-test", "Run safe local package tests");
     local_test_step.dependOn(&run_local_tests.step);
 
     const operation_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "operation-test",
         .root_module = test_mod,
         .filters = &.{
@@ -508,6 +534,8 @@ pub fn build(b: *std.Build) void {
     });
     const run_operation_tests = b.addRunArtifact(operation_tests);
     const adapter_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "operation-adapter-test",
         .root_module = test_mod,
         .filters = &.{
@@ -525,6 +553,8 @@ pub fn build(b: *std.Build) void {
     operation_test_step.dependOn(&run_adapter_tests.step);
 
     const parser_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "pkgbuild-parser-test",
         .root_module = test_mod,
         .filters = &.{ "pkgbuild.parser", "issue 1880" },
@@ -533,6 +563,8 @@ pub fn build(b: *std.Build) void {
     b.step("pkgbuild-parser-test", "Test static shell word and PKGBUILD semantics").dependOn(&run_parser_tests.step);
 
     const pkgbuild_review_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "pkgbuild-review-test",
         .root_module = test_mod,
         .filters = &.{
@@ -589,20 +621,22 @@ pub fn build(b: *std.Build) void {
     downloader_test_module.addImport("Shelly_Download", shelly_download);
     downloader_test_module.addImport("operation_context", operation_context_mod);
     downloader_test_module.addImport("ShellyHttp", shelly_http.module("ShellyHttp"));
-    const downloader_tests = b.addTest(.{ .name = "downloader-test", .root_module = downloader_test_module });
+    const downloader_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .name = "downloader-test", .root_module = downloader_test_module });
     const run_downloader_tests = b.addRunArtifact(downloader_tests);
     const downloader_test_step = b.step("downloader-test", "Run safe downloader and cancellation tests");
     downloader_test_step.dependOn(&run_downloader_tests.step);
-    const download_queue_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const download_queue_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = b.createModule(.{
         .root_source_file = b.path("src/shared/download_queue.zig"),
         .target = target,
         .optimize = optimize,
     }) });
     download_queue_tests.root_module.addImport("Shelly_Download", shelly_download);
-    downloader_test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shelly_download })).step);
+    downloader_test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = shelly_download })).step);
     const run_download_queue_tests = b.addRunArtifact(download_queue_tests);
     downloader_test_step.dependOn(&run_download_queue_tests.step);
     const download_limit_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_mod,
         .filters = &.{"ALPM package and database downloads honor limits across mirror retries"},
     });
@@ -610,12 +644,14 @@ pub fn build(b: *std.Build) void {
     downloader_test_step.dependOn(&run_download_limit_tests.step);
 
     const cache_test_module = test_mod;
-    const cache_tests = b.addTest(.{ .name = "cache-test", .root_module = cache_test_module, .filters = &.{"cache"} });
+    const cache_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .name = "cache-test", .root_module = cache_test_module, .filters = &.{"cache"} });
     const run_cache_tests = b.addRunArtifact(cache_tests);
     const cache_test_step = b.step("cache-test", "Run safe package-cache tests");
     cache_test_step.dependOn(&run_cache_tests.step);
 
     const archive_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "archive-test",
         .root_module = test_mod,
         .filters = &.{
@@ -633,6 +669,8 @@ pub fn build(b: *std.Build) void {
     archive_test_step.dependOn(&run_archive_tests.step);
 
     const removal_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "alpm-removal-test",
         .root_module = test_mod,
         .filters = &.{"remove_packages"},
@@ -641,6 +679,8 @@ pub fn build(b: *std.Build) void {
     removal_test_step.dependOn(&b.addRunArtifact(removal_tests).step);
 
     const alpm_query_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "alpm-query-test",
         .root_module = test_mod,
         .filters = &.{
@@ -702,6 +742,8 @@ pub fn build(b: *std.Build) void {
     alpm_query_test_step.dependOn(&run_alpm_query_tests.step);
 
     const required_packages_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "required-packages-test",
         .root_module = test_mod,
         .filters = &.{
@@ -718,6 +760,8 @@ pub fn build(b: *std.Build) void {
     required_packages_test_step.dependOn(&run_required_packages_tests.step);
 
     const alpm_sync_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "alpm-sync-test",
         .root_module = test_mod,
         .filters = &.{
@@ -738,6 +782,8 @@ pub fn build(b: *std.Build) void {
     alpm_sync_test_step.dependOn(&run_alpm_sync_tests.step);
 
     const restart_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "restart-test",
         .root_module = test_mod,
         .filters = &.{
@@ -750,6 +796,8 @@ pub fn build(b: *std.Build) void {
     restart_test_step.dependOn(&run_restart_tests.step);
 
     const flatpak_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "flatpak-test",
         .root_module = test_mod,
         .filters = &.{
@@ -794,6 +842,8 @@ pub fn build(b: *std.Build) void {
         flatpak_backend_dep.module("Shelly_Flatpak_Protocol"),
     );
     const fake_backend = b.addLibrary(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "shelly-flatpak-backend-package-manager-test",
         .linkage = .dynamic,
         .root_module = fake_backend_module,
@@ -838,6 +888,8 @@ pub fn build(b: *std.Build) void {
         fake_backend_options,
     );
     const backend_integration_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "flatpak-backend-test",
         .root_module = backend_integration_module,
     });
@@ -849,6 +901,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_backend_integration_tests.step);
 
     const aur_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "aur-test",
         .root_module = test_mod,
         .filters = &.{
@@ -1042,6 +1096,8 @@ pub fn build(b: *std.Build) void {
     const aur_test_step = b.step("aur-test", "Run safe AUR manager and event tests");
     aur_test_step.dependOn(&run_aur_tests.step);
     const source_compression_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "source-compression-test",
         .root_module = archive_mod,
         .filters = &.{"standalone compression"},
@@ -1050,6 +1106,8 @@ pub fn build(b: *std.Build) void {
     aur_test_step.dependOn(&run_source_compression_tests.step);
     test_step.dependOn(&run_source_compression_tests.step);
     const source_archive_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "source-archive-test",
         .root_module = archive_mod,
         .filters = &.{"archive reader"},
@@ -1060,6 +1118,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_source_archive_tests.step);
 
     const appimage_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "appimage-test",
         .root_module = test_mod,
         .filters = &.{
@@ -1119,6 +1179,8 @@ pub fn build(b: *std.Build) void {
     appimage_test_step.dependOn(&run_appimage_tests.step);
 
     const repo_db_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "repo-db-test",
         .root_module = test_mod,
         .filters = &.{

@@ -8,6 +8,8 @@ pub const AurBackend = enum { aur, atoll, both, none };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    // Zig 0.16's native ELF linker cannot handle PC64 relocations in newer glibc.
+    const use_llvm: ?bool = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) true else null;
     const optimize = b.standardOptimizeOption(.{});
     const diagnostics = b.dependency("shelly_diagnostics", .{ .target = target, .optimize = optimize }).module("diagnostics");
 
@@ -112,6 +114,8 @@ pub fn build(b: *std.Build) void {
     );
 
     const exe = b.addExecutable(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "Shelly_Ui_Gtk",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -211,8 +215,8 @@ pub fn build(b: *std.Build) void {
     valgrind_step.dependOn(&valgrind_cmd.step);
 
     const test_filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain this text") orelse &.{};
-    const root_tests = b.addTest(.{ .root_module = shelly_ui_gtk, .filters = test_filters });
-    const exe_tests = b.addTest(.{ .root_module = exe.root_module, .filters = test_filters });
+    const root_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = shelly_ui_gtk, .filters = test_filters });
+    const exe_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = exe.root_module, .filters = test_filters });
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&b.addRunArtifact(root_tests).step);

@@ -220,6 +220,12 @@ Upcoming features and development targets:
 - **vala** (for building)
 - **libalpm** (provided by `pacman`; omitted from the CLI build with `-Dlibalpm=false`)
 
+CI uses the official Zig **0.16.0** release. Linux x86_64 executables, libraries,
+and tests in the CI components explicitly use LLVM and LLD to avoid a native
+linker incompatibility with newer glibc startup objects (`R_X86_64_PC64`).
+This can increase Debug compilation time; release builds already use LLVM by
+default. No custom compiler build is required.
+
 ### Optional Prerequisites
 
 - **Flatpak support**: Install both `flatpak` and

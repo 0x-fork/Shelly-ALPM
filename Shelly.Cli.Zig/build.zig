@@ -3,6 +3,8 @@ const package_manifest = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    // Zig 0.16's native ELF linker cannot handle PC64 relocations in newer glibc.
+    const use_llvm: ?bool = if (target.result.os.tag == .linux and target.result.cpu.arch == .x86_64) true else null;
     const optimize = b.standardOptimizeOption(.{});
     const path_profile = b.option([]const u8, "path-profile", "Distribution path defaults: pacman or devario") orelse "pacman";
     const enable_libalpm = b.option(bool, "libalpm", "Include the libalpm backend alongside RLPM (tests auto-detect when omitted)");
@@ -44,6 +46,8 @@ pub fn build(b: *std.Build) void {
     executable_module.addImport("PackageManager", package_manager);
 
     const executable = b.addExecutable(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "shelly",
         .root_module = executable_module,
     });
@@ -79,11 +83,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const repair_tests = b.addTest(.{ .root_module = test_cli, .filters = &.{"repairDb"} });
+    const repair_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = test_cli, .filters = &.{"repairDb"} });
     const repair_test_step = b.step("database-repair-test", "Test repair of the configured database");
     repair_test_step.dependOn(&b.addRunArtifact(repair_tests).step);
 
     const configuration_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_cli,
         .filters = &.{ "global config", "config selection", "keyring config", "shellystrap", "hook replacements" },
     });
@@ -91,6 +97,8 @@ pub fn build(b: *std.Build) void {
     configuration_step.dependOn(&b.addRunArtifact(configuration_tests).step);
 
     const appimage_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "appimage-test",
         .root_module = test_cli,
         .filters = &.{ "AppImage", "appimage" },
@@ -99,6 +107,8 @@ pub fn build(b: *std.Build) void {
         .dependOn(&b.addRunArtifact(appimage_tests).step);
 
     const purify_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "purify-test",
         .root_module = test_cli,
         .filters = &.{ "purify", "AUR cleanup", "AUR cache" },
@@ -107,11 +117,15 @@ pub fn build(b: *std.Build) void {
         .dependOn(&b.addRunArtifact(purify_tests).step);
 
     const module_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_cli,
     });
     const run_module_tests = b.addRunArtifact(module_tests);
 
     const executable_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_executable_module,
     });
     const run_executable_tests = b.addRunArtifact(executable_tests);
@@ -121,6 +135,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_executable_tests.step);
 
     const appimage_removal_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_cli,
         .filters = &.{ "AppImage removal", "resolves one AppImage", "remove AppImage" },
     });
@@ -128,6 +144,8 @@ pub fn build(b: *std.Build) void {
     b.step("appimage-removal-test", "Test AppImage removal identity and stale metadata cleanup").dependOn(&run_appimage_removal_tests.step);
 
     const upgrade_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .root_module = test_cli,
         .filters = &.{"upgrade"},
     });
@@ -136,6 +154,8 @@ pub fn build(b: *std.Build) void {
     upgrade_test_step.dependOn(&run_upgrade_tests.step);
 
     const account_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "user-account-test",
         .root_module = test_cli,
         .filters = &.{ "NSS", "invoking identity", "invoking user", "elevation resolves", "elevation takes precedence", "XDG" },
@@ -153,21 +173,27 @@ pub fn build(b: *std.Build) void {
     builder_test_module.addImport("PackageManager", test_package_manager);
     builder_test_module.addOptions("build_options", build_options);
     const bootstrap_configuration_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "bootstrap-configuration-test",
         .root_module = builder_test_module,
         .filters = &.{"shellystrap"},
     });
     configuration_step.dependOn(&b.addRunArtifact(bootstrap_configuration_tests).step);
     const isolated_config_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "isolated-config-test",
         .root_module = builder_test_module,
         .filters = &.{ "isolated child arguments", "isolated configuration preserves build policy" },
     });
     b.step("isolated-config-test", "Test host configuration isolation from guest build commands")
         .dependOn(&b.addRunArtifact(isolated_config_tests).step);
-    const checksum_update_tests = b.addTest(.{ .root_module = builder_test_module, .filters = &.{"updpkgsums"} });
+    const checksum_update_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = builder_test_module, .filters = &.{"updpkgsums"} });
     b.step("updpkgsums-test", "Test checksum updates and paired SRCINFO publication").dependOn(&b.addRunArtifact(checksum_update_tests).step);
     const builder_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "builder-command-test",
         .root_module = builder_test_module,
         .filters = &.{
@@ -191,7 +217,7 @@ pub fn build(b: *std.Build) void {
             "host coordinator",
         },
     });
-    const dependency_plan_tests = b.addTest(.{ .root_module = builder_test_module, .filters = &.{"dependency plan"} });
+    const dependency_plan_tests = b.addTest(.{ .use_llvm = use_llvm, .use_lld = use_llvm, .root_module = builder_test_module, .filters = &.{"dependency plan"} });
     b.step("build-plan-test", "Test dependency plan CLI and configuration contracts").dependOn(&b.addRunArtifact(dependency_plan_tests).step);
     const run_builder_tests = b.addRunArtifact(builder_tests);
     b.step("builder-command-test", "Test native build command configuration and coordinator transport").dependOn(&run_builder_tests.step);
@@ -207,6 +233,8 @@ pub fn build(b: *std.Build) void {
     isolated_test_module.addImport("diagnostics", diagnostics);
     isolated_test_module.addImport("PackageManager", test_package_manager);
     const isolated_tests = b.addTest(.{
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
         .name = "isolated-build-test",
         .root_module = isolated_test_module,
         .filters = &.{
